@@ -98,7 +98,7 @@ Linux, AMD or manual setup: see [Installation](docs/DOCUMENTATION.md#3-install).
 .\ai status                  # both GPUs, residency, queue, health
 .\ai chat -v                 # chat from the terminal; -v shows the memory used
 .\ai memory search "query"   # search project memory
-.\ai docs lookup Rigidbody.MovePosition
+.\ai docs lookup [tool]      # search tool documentation
 .\ai eval run                # compare settings on your own sessions
 ```
 
