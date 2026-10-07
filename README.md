@@ -15,6 +15,9 @@ Ollama client  ───►  memory, docs, context  ───►
 The primary model only does the work. Everything else (deciding what to remember, summarising long
 sessions, compressing old tool output, searching docs) happens on the second GPU, in the background.
 
+The main inspiration for this project was an old 2070 RTX Super I had lying around - "Free VRAM" I thought.
+Turned out as a memory orchestrator, benchmark and tooling harness for the coding model on my main GPU.
+
 ## Why
 
 Agentic game development means long sessions: dozens of tool calls, big files and logs, and an engine API
