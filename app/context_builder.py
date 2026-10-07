@@ -41,7 +41,7 @@ RENDER_ORDER: list[tuple[Category, str]] = [
     (Category.discovery, "RELEVANT DISCOVERIES"),
 ]
 
-_TAG_RE = re.compile(r"</?\s*(PROJECT_MEMORY_BASE|PROJECT_MEMORY|EXTERNAL_MEMORY|USER_REQUEST)\s*>", re.I)
+_TAG_RE = re.compile(r"</?\s*(PROJECT_MEMORY_BASE|PROJECT_MEMORY|EXTERNAL_MEMORY|USER_REQUEST|REFERENCE)\s*>", re.I)
 
 UPDATES_LABEL = "UPDATED SINCE THE MEMORY BASE (these override the base in the system prompt)"
 BASE_ORDER: list[tuple[Category, str]] = [

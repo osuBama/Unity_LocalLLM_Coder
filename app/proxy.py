@@ -211,6 +211,8 @@ class TurnPlan:
     base: StableSnapshot | None = None                  # frozen memory base for the system prompt
     est_size: int | None = None                         # size mode: estimated prompt tokens
     think: object = None                                # thinking.KEEP or a bool to send
+    ref_text: str = ""                                  # automatic <REFERENCE> excerpts
+    ref_tokens: int = 0
     think_reason: str = ""
 
 
@@ -269,7 +271,8 @@ def build_router(orch: Orchestrator) -> APIRouter:
             body = orch.calibrator.tokens(model, chars)
         else:
             body = math.ceil(chars / 3.5)
-        return (body + 4 * len(kept) + cfg.memory.max_context_tokens + cfg.proxy.reply_reserve_tokens)
+        refs = cfg.references.auto_max_tokens if (orch.references is not None and orch.references.has_auto()) else 0
+        return (body + 4 * len(kept) + cfg.memory.max_context_tokens + refs + cfg.proxy.reply_reserve_tokens)
 
     def size_layout(conversation_id: str, turn: int, original: list[dict], tools_chars: int,
                     covered: int, model: str = "") -> tuple[int, int, int]:
@@ -353,6 +356,9 @@ def build_router(orch: Orchestrator) -> APIRouter:
         else:
             ctx = BuiltContext("", 0)
         plan = TurnPlan(drop, ctx, covered, boundary=boundary, base=base, est_size=est_size)
+        if cfg.proxy.inject_memory:
+            plan.ref_text, hits = orch.reference_block(user_text, qvec)
+            plan.ref_tokens = sum(h["tokens"] for h in hits)
         # Decided once per turn so the model doesn't switch modes between tool-call steps.
         plan.think, plan.think_reason = thinking.decide(cfg.thinking.mode, client_think, user_text,
                                                         cfg.thinking.simple_max_words)
@@ -399,14 +405,15 @@ def build_router(orch: Orchestrator) -> APIRouter:
                 messages.insert(0, {"role": "system", "content": system_add})
 
         plan = info["plan"]
-        if plan is not None and plan.ctx.text:
+        if plan is not None and (plan.ctx.text or plan.ref_text):
             # Attach the block to the LAST message (the user's message, or the newest tool
             # result mid tool-loop). Next request that message reappears without the block,
             # so only the block itself drops out of the cache, never the tool output after it.
             idx = len(messages) - 1
             if messages[idx].get("role") not in ("user", "tool") or not isinstance(messages[idx].get("content"), str):
                 idx = last_user_index(messages)
-            messages[idx] = {**messages[idx], "content": wrap_user_request(plan.ctx.text, messages[idx]["content"])}
+            block = "\n\n".join(x for x in (plan.ctx.text, plan.ref_text) if x)
+            messages[idx] = {**messages[idx], "content": wrap_user_request(block, messages[idx]["content"])}
             info["memory_tokens"] = plan.ctx.token_estimate
             info["memory_ids"] = plan.ctx.included
         out["messages"] = messages
@@ -439,6 +446,7 @@ def build_router(orch: Orchestrator) -> APIRouter:
                "memory_retrieval_count": len(info["memory_ids"]),
                "memory_tokens": info["memory_tokens"],
                "memory_base_tokens": plan.base.tokens if plan and plan.base else 0,
+               "reference_tokens": plan.ref_tokens if plan else 0,
                "total_context_tokens": info["total_context_tokens"],
                "history_messages_trimmed": info["trimmed"],
                "user_turns_dropped": plan.drop if plan else 0,

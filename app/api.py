@@ -99,6 +99,10 @@ def create_app(config: Config | None = None, *,
                 "worker_running": orch.worker._task is not None and not orch.worker._task.done(),
                 "memory_tasks": orch.db.task_counts(),
                 "embeddings": emb,
+                "references": None if orch.references is None else {
+                    "libraries": len(orch.references.libraries()),
+                    "mcp": f"http://{config.application.host}:{config.application.port}/mcp"
+                    if config.references.mcp_enabled else None},
                 "memory_files_ok": not bad, "memory_file_errors": bad, "warnings": warnings}
 
     @app.get("/memory/state")
@@ -187,6 +191,8 @@ def create_app(config: Config | None = None, *,
         return snap
 
     app.include_router(build_ui_router(orch))
+    from .mcp import build_mcp_router
+    app.include_router(build_mcp_router(orch))
 
     # ---------------------------------------------- OpenClaw / Ollama proxy
     app.include_router(build_router(orch))

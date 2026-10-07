@@ -21,10 +21,12 @@ client ──► orchestrator :8000 ──► Ollama A (GPU 1)  primary model
   Ollama's cache keeps hitting.
 - **Semantic search and history recall**: hybrid keyword + vector retrieval, plus excerpts from past
   conversations when they're relevant.
+- **Reference libraries**: index documentation and code (e.g. Unity docs, packages) for the model to look
+  up on demand through MCP tools, or as small automatic excerpts, without bloating memory or the context.
 - **Adaptive thinking**: skips the thinking phase on simple turns.
 - **Self-maintaining**: idle-time consolidation of duplicates, with backups and one-command restore.
-- **Web console**: status of both GPUs, chat, memory browser and editor, settings, and side-by-side eval
-  comparison at `http://127.0.0.1:8000/ui`.
+- **Web console**: everything the CLI does, at `http://127.0.0.1:8000/ui`: both GPUs' status, chat, memory,
+  reference libraries, settings, and evaluation runs with side-by-side comparison.
 - **Evaluation harness**: replays your own sessions to compare settings on cost and accuracy, explains why
   each answer passed or failed, and builds its test set from your corrections and from facts in your
   recorded sessions.
@@ -40,7 +42,8 @@ client ──► orchestrator :8000 ──► Ollama A (GPU 1)  primary model
 **Windows (recommended):**
 
 ```powershell
-git clone <this repo>
+git clone <this repo> D:\AI
+cd D:\AI
 powershell -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
@@ -65,6 +68,7 @@ memory, change settings and compare evaluation runs. From the terminal:
 .\ai chat -v                 # chat from the terminal; -v shows the memory used
 .\ai memory show             # what the system remembers
 .\ai memory search "query"   # search memory
+.\ai docs add <folder> --name unity-6 --version 6000.0   # index documentation or code
 .\ai eval run                # compare settings on your own sessions
 ```
 

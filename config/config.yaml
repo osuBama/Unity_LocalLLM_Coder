@@ -142,6 +142,21 @@ history_recall:
   cue_min_similarity: 0.45      # lower bar when you say "last time", "earlier", "remember"...
   chunk_chars: 1500
 
+references:
+  # Documentation and code libraries (Unity docs, packages, your libraries). Add them with
+  # `ai docs add <folder> --name ...` or in the console's Library tab. The model reaches them
+  # on demand through MCP tools (docs_search, docs_lookup at /mcp), and, for libraries marked
+  # auto-inject, through a small automatic excerpt budget per turn.
+  enabled: true
+  chunk_tokens: 350
+  half_precision: true          # float16 vectors: half the RAM
+  min_similarity: 0.35          # for searches the model asks for
+  auto_max_tokens: 800          # automatic excerpts per turn; 0 = only on demand
+  auto_top_k: 3
+  auto_min_similarity: 0.55     # stricter than on-demand search
+  mcp_enabled: true
+  tool_max_tokens: 1500         # cap on one docs_search / docs_lookup result
+
 thinking:
   # Primary-model thinking per turn. auto: thinking is switched OFF only for clearly simple
   # turns (short, no code/errors, no why/debug/design/implement-type words, EN+PT); otherwise

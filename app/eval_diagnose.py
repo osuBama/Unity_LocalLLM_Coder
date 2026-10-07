@@ -31,6 +31,7 @@ LABELS = {
 
 _BASE_RE = re.compile(r"<PROJECT_MEMORY_BASE>(.*?)</PROJECT_MEMORY_BASE>", re.S)
 _BLOCK_RE = re.compile(r"<PROJECT_MEMORY>(.*?)</PROJECT_MEMORY>", re.S)
+_REF_RE = re.compile(r"<REFERENCE>(.*?)</REFERENCE>", re.S)
 _SESSION = "SESSION SO FAR"
 _HISTORY = "RELATED PAST EXCHANGES"
 _SECTION_RE = re.compile(r"^([A-Z][A-Z /()]+?)(?: \(.*?\))?:\s*$", re.M)
@@ -56,7 +57,7 @@ def evidence_in(case, text: str) -> bool:
 def split_prompt(messages: list[dict], question: str) -> dict[str, str]:
     """Split the prompt actually sent into the places evidence can come from."""
     parts = {"conversation": "", "memory_base": "", "memory_turn": "", "session_summary": "",
-             "past_exchanges": ""}
+             "past_exchanges": "", "reference": ""}
     convo: list[str] = []
     for i, m in enumerate(messages):
         content = m.get("content")
@@ -67,7 +68,9 @@ def split_prompt(messages: list[dict], question: str) -> dict[str, str]:
                 parts["memory_base"] += b
             continue
         blocks = _BLOCK_RE.findall(content)
-        visible = _BLOCK_RE.sub("", content)
+        for r in _REF_RE.findall(content):
+            parts["reference"] += r
+        visible = _REF_RE.sub("", _BLOCK_RE.sub("", content))
         for b in blocks:
             # Split the per-turn block into its sections.
             current = "memory_turn"

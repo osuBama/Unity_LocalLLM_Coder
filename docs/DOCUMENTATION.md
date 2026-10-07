@@ -487,6 +487,58 @@ milliseconds, so there is no separate vector database to run.
   (setup.ps1 offers to run it). New turns are indexed automatically.
 - Changing `embeddings.model` makes old vectors unusable: run `ai memory reindex` afterwards.
 
+### 9.10 Reference libraries (documentation and code)
+
+Documentation and libraries the model should *consult* (the Unity scripting reference, a package's
+source, your studio's shared code) are too big for memory and would swamp the context window. They get
+their own index instead:
+
+```
+ai docs add D:\Docs\Unity6 --name unity-6 --version 6000.0 --description "Unity 6 manual + scripting API"
+ai docs add D:\Packages\com.unity.inputsystem --name input-system --version 1.11 --auto
+ai docs list | update unity-6 | remove input-system | enable/disable NAME | auto NAME on|off
+ai docs search "move a kinematic rigidbody" | lookup Rigidbody.MovePosition | mcp
+```
+
+The console's **Library** tab does all of the same, with a folder browser and live indexing progress.
+
+- **What gets indexed:** Markdown, HTML (navigation and scripts stripped), text, C#, Python, JS/TS and
+  shader files. `Library`, `Temp`, `obj`, `bin`, `.git` and `node_modules` are skipped. **C#** is split per
+  type and per member, with its `///` comments and its full name (`Game.Physics.Mover.MoveKinematic`), so
+  an exact lookup returns exactly that member. Re-indexing only processes changed files, and removed files
+  drop out of the index.
+- **Search** is hybrid: SQLite's full-text index (BM25) for exact names, plus embeddings for meaning,
+  merged by rank. Vectors are stored per library, at half precision by default (`references.half_precision`).
+- **Two ways into the model:**
+  - **On demand (recommended for agent work):** the orchestrator serves an MCP server at `/mcp` with
+    `docs_search`, `docs_lookup` and `docs_libraries`. setup.ps1 registers it with OpenClaw as `local-docs`;
+    `ai docs mcp` prints the snippet for doing it by hand. The model looks things up only when it needs to,
+    and results are capped at `references.tool_max_tokens`. Like any tool output, they're later compressed
+    into digests.
+  - **Automatic:** for libraries marked *automatic*, up to `references.auto_max_tokens` (800) of excerpts are
+    added in a `<REFERENCE>` block, but only on a keyword hit or a similarity above
+    `references.auto_min_similarity`. That budget is reserved in the context-window estimate *only while an
+    automatic library exists*, so it never pushes a prompt past `num_ctx`.
+- **Cost:** no VRAM beyond the embedding model you already run. System RAM for vectors is roughly
+  (sections × 768 dimensions × 2 bytes) with nomic-embed-text at half precision, about 150 MB per
+  100,000 sections. Indexing the namespaces and packages you actually use keeps it small.
+- **Safety:** documentation text is data. It is sanitised so it can't close the `<REFERENCE>` or memory
+  blocks, the primary is told not to follow instructions inside it, and `/mcp` is read-only and refuses
+  requests from non-local browser origins.
+
+**A Unity setup that works well:**
+1. Put the project's fixed facts in memory (Memory tab, *Add entry*, category *constraint* or
+   *environment*): Unity version, render pipeline (URP/HDRP), Input System, scripting conventions, folder
+   layout. They go into the cached memory base, which is close to free per turn and prevents the classic
+   wrong-version answers.
+2. Index Unity's offline documentation (downloadable from Unity's documentation site) as one library with
+   its version, and the packages you depend on as separate libraries. Mark *automatic* only the one or two
+   you use constantly.
+3. Let the agent read your own scripts through its file tools. Tool-output compression keeps old reads from
+   filling the window.
+4. Add golden questions about APIs, e.g. `expect_all: ["MovePosition"]`. The diagnosis shows whether a miss
+   came from the library, retrieval, or the model (location `reference`).
+
 ## 10. Web console
 
 `http://127.0.0.1:8000/ui` (or `ai ui`) is served by the orchestrator itself: nothing extra to install,
@@ -505,11 +557,31 @@ every loaded model sits on the GPU, and the memory GPU's task queue. Tabs:
   your comments intact, and validates it first (nothing is written if it wouldn't load). Settings marked
   *applies now* take effect immediately; *after restart* ones (models, context sizes, memory budget,
   flags) need the orchestrator restarted.
+- **Library:** reference libraries (§9.10): add with a folder browser, re-index, edit version and description,
+  enable or disable, automatic excerpts on or off, remove, search and exact-symbol lookup, live indexing
+  progress with cancel, and the MCP connection details.
 - **Evals:** start an evaluation (it runs as a separate process; the log streams into the page), select
   reports and compare them with bars for processed tokens and golden pass rate (with 95% intervals), a
   details table and a per-question matrix, and review captured corrections. Suggested checks are
   prefilled: values in your correction become *must contain*, values you negated ("not 11434") become
   *must not contain*.
+
+**Everything the CLI does, the console does:**
+
+| CLI | Console |
+|---|---|
+| `ai status`, `ai metrics` | header lanes, Overview |
+| `ai chat` | Chat |
+| `ai memory show / search / context / changes / review` | Memory: list, search, preview, *Recent changes*, *Show unused entries* |
+| `ai memory tasks / sessions / validate` | Memory: *Background tasks*, *Session summaries*, *Check memory files* |
+| `ai memory backup / consolidate [--dry-run] / reindex` | Memory: *Back up now*, *Preview consolidation* / *Consolidate now*, *Reindex for search* |
+| `ai memory rebuild [--replay [--reset]] / restore` | Memory: *Rebuild…*, *Restore from a backup…* |
+| `ai docs …` (all subcommands) | Library |
+| `config.yaml` edits | Settings (curated, validated, comments kept) |
+| `ai eval sessions / run (all options)` | Evals: *More options* (sessions, memory mode, max turns, seed, answer length, extraction, client system prompt) |
+| `ai eval candidates / accept / dismiss / generate` | Evals: *Questions waiting for review*, *Generate questions* |
+
+`ai serve` (start the server) and `ai ui` (open the console) are the only CLI-only commands, for obvious reasons.
 
 **Security.** The console and the admin API only listen on `127.0.0.1`. Every state-changing request
 outside `/api/*`, `/v1/*` and `/chat` must carry an `X-AI-Client` header. Browsers can't add that
@@ -528,6 +600,8 @@ ai memory consolidate [--dry-run] | review
 ai eval sessions | ai eval run [--variant a,b,…] [--sessions …] [--golden …] [--max-turns N]
 ai eval candidates [--all] | ai eval accept <id> [--expect X] [--forbid Y] | ai eval dismiss <id>
 ai eval generate [--mode later|new-session|both] [--last N] [--gap 6] [--no-model] [--accept-all]
+ai docs list | add <folder> --name N [--version V] [--description D] [--auto] | update N [--path P] | remove N
+ai docs enable|disable N | auto N on|off | set N [--version] [--description] | search "q" | lookup Symbol | mcp
 ```
 
 `ai memory context "prompt"` shows exactly what would be injected for a prompt. `rebuild` alone
@@ -545,6 +619,7 @@ server (or use the API) before CLI commands that write memory: rebuild, restore,
 | POST | `/memory/rebuild`, `/memory/backup` | maintenance |
 | POST | `/memory/consolidate[?dry_run=true]` | run consolidation now (§9.6) |
 | GET | `/memory/consolidation`, `/memory/review` | consolidation status and last report; unused entries |
+| POST | `/mcp` | MCP server (Streamable HTTP): `docs_search`, `docs_lookup`, `docs_libraries` |
 | * | `/api/*`, `/v1/*`, `/` | passthrough to the primary instance (memory only on `/api/chat`) |
 
 Logs: `logs\orchestrator.log`, `primary.log`, `memory.log` (JSON lines), plus each Ollama
@@ -757,6 +832,6 @@ traffic. `ai memory changes` (rejection rate), `ai memory sessions` (summary qua
   `project_id`).
 - A large second GPU could take on more: embeddings, a bigger memory model, or splitting one large
   primary model across both cards instead. That trades the memory system for raw model size.
-- Tested with fake Ollama instances (224 tests: validator, atomic writes, streaming, flag stripping,
-  trimming, compression and memory-base cache stability, consolidation guards, evaluation harness, setup helpers, thinking decisions, token calibration, correction capture, hybrid retrieval, history recall, repeat runs, the console's backend, point-in-time memory, paired statistics, answer diagnosis, question generation, retries…). Real-GPU behaviour (pinning, VRAM fit, a given
+- Tested with fake Ollama instances (235 tests: validator, atomic writes, streaming, flag stripping,
+  trimming, compression and memory-base cache stability, consolidation guards, evaluation harness, setup helpers, thinking decisions, token calibration, correction capture, hybrid retrieval, history recall, repeat runs, the console's backend, point-in-time memory, paired statistics, answer diagnosis, question generation, reference libraries, MCP, retries…). Real-GPU behaviour (pinning, VRAM fit, a given
   model's JSON quality) can only be verified on your machine (§4.5); the evaluation harness (§12) is how you do that.

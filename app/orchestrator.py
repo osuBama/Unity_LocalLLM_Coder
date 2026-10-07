@@ -79,6 +79,10 @@ class Orchestrator:
         self._recent: dict[str, deque] = {}
         self._turns: dict[str, int] = {}
         self._bases: OrderedDict[tuple, StableSnapshot] = OrderedDict()
+        self.references = None
+        if config.references.enabled:
+            from .references import References
+            self.references = References(self)
         self.last_request_at = time.time()
         # Evaluation only: when set to a dict, the proxy records the exact messages sent to the
         # primary per conversation (for tracing where a golden answer's evidence was).
@@ -104,6 +108,18 @@ class Orchestrator:
         if self.embedder is None or not text:
             return None
         return await self.embedder.query(text)
+
+    def reference_block(self, query: str, qvec) -> tuple[str, list[dict]]:
+        """Automatic documentation excerpts for this turn ('' if none qualify)."""
+        if self.references is None:
+            return "", []
+        try:
+            from .references import render_reference_block
+            hits = self.references.auto(query, qvec)
+            return render_reference_block(hits), hits
+        except Exception:
+            log.exception("reference search failed")
+            return "", []
 
     def recall_history(self, query: str, qvec, conversation_id: str, in_prompt_after_turn: int) -> list[dict]:
         if self.indexer is None:
@@ -255,18 +271,21 @@ class Orchestrator:
         ctx = self.context_builder.build(message, max_tokens=budget, base=base, preamble=False,
                                          session_summary=summary["summary"] if summary else None,
                                          query_vec=qvec, history=history)
+        ref_text, ref_hits = self.reference_block(message, qvec)
         messages = [{"role": "system", "content": self.system_prompt(base)}]
         self.record_usage(list(ctx.included) + list(base.fingerprints if base else ()))
         recent = self._recent.setdefault(conversation_id, deque(maxlen=max(1, self.config.conversation.recent_turns) * 2))
         if self.config.conversation.recent_turns:
             messages.extend(recent)
-        messages.append({"role": "user", "content": wrap_user_request(ctx.text, message)})
+        block = "\n\n".join(x for x in (ctx.text, ref_text) if x)
+        messages.append({"role": "user", "content": wrap_user_request(block, message)})
 
         rec = {"request_id": request_id, "conversation_id": conversation_id, "mode": "chat",
                "primary_model": self.config.ollama.primary.model,
                "memory_model": self.config.ollama.memory.model,
                "memory_retrieval_count": len(ctx.included), "memory_tokens": ctx.token_estimate,
                "memory_base_tokens": base.tokens if base else 0,
+               "reference_tokens": sum(h["tokens"] for h in ref_hits),
                "total_context_tokens": sum(estimate_tokens(m["content"]) for m in messages)}
         from . import thinking
         think, think_reason = thinking.decide(self.config.thinking.mode, None, message,
@@ -305,6 +324,7 @@ class Orchestrator:
         return {"conversation_id": conversation_id, "response": answer, "memory_update_queued": queued,
                 "request_id": request_id,
                 "memory_entries_used": sorted(set(ctx.included) | set(base.fingerprints if base else ())),
+                "references_used": [f"{h['library']}: {h['title']}" for h in ref_hits],
                 "memory_flags": flags, "turn": turn_number,
                 "thinking": rec.get("thinking"), "thinking_reason": rec.get("thinking_reason"),
                 "seconds": rec.get("total_request_time")}

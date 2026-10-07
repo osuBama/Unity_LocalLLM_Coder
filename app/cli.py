@@ -83,6 +83,94 @@ def cmd_http_get(cfg, path: str) -> int:
     return 0
 
 
+def cmd_docs(cfg, args) -> int:
+    orch = _orch(cfg)
+    refs = orch.references
+    try:
+        if refs is None:
+            print("Reference libraries are disabled (references.enabled: false in config.yaml).")
+            return 2
+        sub = args.docs_cmd
+        if sub == "list":
+            libs = refs.libraries()
+            if not libs:
+                print("No libraries yet. Add one: ai docs add <folder> --name unity-6 --version 6000.0")
+            for l in libs:
+                flags = ("enabled" if l["enabled"] else "disabled") + (", auto-inject" if l["auto_inject"] else "")
+                size = f"{l['vector_bytes'] / 1e6:.1f} MB" if l["vector_bytes"] >= 1e5 else f"{l['vector_bytes'] / 1e3:.0f} KB"
+                print(f"{l['name']:<24} {l['version']:<12} {l['files']:>6} files {l['chunks']:>7} sections "
+                      f"{size:>9} vectors  [{flags}]\n    {l['source_path']}"
+                      + (f"\n    {l['description']}" if l["description"] else ""))
+            return 0
+        if sub in ("add", "update"):
+            if sub == "add" and refs.get(args.name):
+                print(f"A library named {args.name!r} exists; use: ai docs update {args.name}")
+                return 2
+            path = args.path if sub == "add" else args.path
+
+            async def go():
+                try:
+                    return await refs.ingest(args.name, path, version=getattr(args, "version", None),
+                                             description=getattr(args, "description", None),
+                                             auto_inject=True if getattr(args, "auto", False) else None,
+                                             progress=print)
+                finally:
+                    await orch.aclose()
+            try:
+                out = asyncio.run(go())
+            except Exception as e:
+                print(f"Indexing failed: {e}")
+                if "connect" in str(e).lower():
+                    print(f"Is the memory instance running with {cfg.embeddings.model} pulled?")
+                return 1
+            print(f"Done: {out['files_changed']} files indexed, {out['files_unchanged']} unchanged, "
+                  f"{out['files_removed']} removed, {out['embedded']} sections embedded.")
+            return 0
+        if sub == "remove":
+            if not args.yes and input(f"Remove library {args.name!r} and its index? [y/N] ").strip().lower() != "y":
+                return 1
+            print("removed" if refs.remove(args.name) else f"no library {args.name!r}")
+            return 0
+        if sub in ("enable", "disable"):
+            refs.set_flags(args.name, enabled=sub == "enable")
+            print(f"{args.name}: {sub}d")
+            return 0
+        if sub == "auto":
+            refs.set_flags(args.name, auto_inject=args.state == "on")
+            print(f"{args.name}: automatic excerpts {args.state}")
+            return 0
+        if sub == "set":
+            refs.set_flags(args.name, version=args.version, description=args.description)
+            print("updated")
+            return 0
+        if sub in ("search", "lookup"):
+            from .references import format_hits
+
+            async def q():
+                try:
+                    if sub == "search":
+                        return refs.search(args.query, await orch.query_vector(args.query),
+                                           libraries=[args.library] if args.library else None, limit=args.limit)
+                    return refs.lookup(args.query, libraries=[args.library] if args.library else None)
+                finally:
+                    await orch.aclose()
+            hits = asyncio.run(q())
+            print(format_hits(hits, 100_000))
+            return 0
+        if sub == "mcp":
+            url = f"http://127.0.0.1:{cfg.application.port}/mcp"
+            print(f"MCP endpoint: {url}\nAdd to ~/.openclaw/openclaw.json (setup.ps1 does this for you):\n")
+            print(json.dumps({"mcp": {"servers": {"local-docs": {"url": url, "transport": "streamable-http"}}}}, indent=2))
+            print("\nThen: openclaw gateway restart && openclaw mcp probe local-docs")
+            return 0
+        return 1
+    finally:
+        try:
+            asyncio.run(orch.aclose())
+        except RuntimeError:
+            pass
+
+
 def cmd_memory(cfg, args) -> int:
     orch = _orch(cfg)
     try:
@@ -353,6 +441,38 @@ def main(argv: list[str] | None = None) -> int:
     s = msp.add_parser("restore", help="restore memory files from a backups\\... snapshot")
     s.add_argument("backup_dir")
 
+    d = sp.add_parser("docs", help="reference libraries: documentation and code the model can consult")
+    dsp = d.add_subparsers(dest="docs_cmd", required=True)
+    dsp.add_parser("list", help="libraries, sizes and flags")
+    s = dsp.add_parser("add", help="index a folder (Markdown, HTML, text, C#, Python, JS/TS...)")
+    s.add_argument("path")
+    s.add_argument("--name", required=True)
+    s.add_argument("--version", default="")
+    s.add_argument("--description", default="")
+    s.add_argument("--auto", action="store_true", help="also add relevant excerpts to prompts automatically")
+    s = dsp.add_parser("update", help="re-scan a library (only changed files are re-indexed)")
+    s.add_argument("name")
+    s.add_argument("--path", help="new source folder")
+    s = dsp.add_parser("remove", help="delete a library and its index")
+    s.add_argument("name")
+    s.add_argument("--yes", action="store_true")
+    for c in ("enable", "disable"):
+        s = dsp.add_parser(c, help=f"{c} a library for search, tools and excerpts")
+        s.add_argument("name")
+    s = dsp.add_parser("auto", help="automatic excerpts on/off for a library")
+    s.add_argument("name")
+    s.add_argument("state", choices=["on", "off"])
+    s = dsp.add_parser("set", help="change version/description")
+    s.add_argument("name")
+    s.add_argument("--version")
+    s.add_argument("--description")
+    for c in ("search", "lookup"):
+        s = dsp.add_parser(c, help="search the libraries" if c == "search" else "look up an exact symbol")
+        s.add_argument("query")
+        s.add_argument("--library")
+        s.add_argument("--limit", type=int, default=5)
+    dsp.add_parser("mcp", help="show the MCP endpoint and the OpenClaw config for it")
+
     e = sp.add_parser("eval", help="evaluation harness (docs/DOCUMENTATION.md §12)")
     esp = e.add_subparsers(dest="eval_cmd", required=True)
     esp.add_parser("sessions", help="list recorded sessions available for replay")
@@ -429,6 +549,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_memory(cfg, args)
     if args.cmd == "eval":
         return cmd_eval(cfg, args)
+    if args.cmd == "docs":
+        return cmd_docs(cfg, args)
     return 1
 
 

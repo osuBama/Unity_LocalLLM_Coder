@@ -87,6 +87,26 @@ SETTINGS: list[dict[str, Any]] = [
     {"group": "Retrieval", "key": "history_recall.max_tokens", "label": "Recall budget", "type": "int",
      "min": 0, "max": 5000, "live": True, "help": "Tokens of past excerpts per prompt."},
 
+    {"group": "Reference libraries", "key": "references.auto_max_tokens", "label": "Automatic excerpts per turn (tokens)",
+     "type": "int", "min": 0, "max": 6000, "live": True,
+     "help": "Budget for auto-inject libraries. 0 = only when the model asks (MCP tools)."},
+    {"group": "Reference libraries", "key": "references.auto_min_similarity", "label": "Automatic excerpt threshold",
+     "type": "float", "min": 0, "max": 1, "step": 0.05, "live": True,
+     "help": "How closely an excerpt must match before it is added unasked. Raise if irrelevant docs appear."},
+    {"group": "Reference libraries", "key": "references.auto_top_k", "label": "Automatic excerpts at most",
+     "type": "int", "min": 1, "max": 10, "live": True, "help": "Maximum number of automatic excerpts per turn."},
+    {"group": "Reference libraries", "key": "references.min_similarity", "label": "Search threshold",
+     "type": "float", "min": 0, "max": 1, "step": 0.05, "live": True,
+     "help": "For searches the model asks for (docs_search) and the Library tab."},
+    {"group": "Reference libraries", "key": "references.mcp_enabled", "label": "Docs tools for the model (MCP)",
+     "type": "bool", "live": True, "help": "docs_search / docs_lookup / docs_libraries at /mcp."},
+    {"group": "Reference libraries", "key": "references.tool_max_tokens", "label": "Tool result size cap",
+     "type": "int", "min": 200, "max": 8000, "live": True, "help": "Tokens per docs_search / docs_lookup result."},
+    {"group": "Reference libraries", "key": "references.chunk_tokens", "label": "Section size when indexing",
+     "type": "int", "min": 80, "max": 2000, "live": True, "help": "Applies to files indexed from now on."},
+    {"group": "Reference libraries", "key": "references.half_precision", "label": "Half-precision vectors",
+     "type": "bool", "live": True, "help": "Half the RAM for vectors indexed from now on; ranking is practically the same."},
+
     {"group": "Maintenance", "key": "consolidation.enabled", "label": "Idle-time consolidation", "type": "bool",
      "live": True, "help": "Merge duplicates and tighten long entries when idle (with backups)."},
     {"group": "Maintenance", "key": "consolidation.idle_minutes", "label": "Idle after (minutes)", "type": "float",
@@ -133,15 +153,51 @@ class EvalRun(BaseModel):
     think: str = "off"
     max_turns: int | None = Field(None, ge=1)
     golden_only: bool = False
+    sessions: list[str] = Field(default_factory=list)   # explicit sessions instead of "last N"
+    memory: str = Field("asof", pattern="^(asof|current|empty)$")
+    extract: bool = False
+    seed: int = 42
+    max_answer_tokens: int | None = Field(None, ge=16, le=32768)
+    min_turns: int = Field(4, ge=1, le=1000)
+    client_system: str = Field("", max_length=200_000)
 
 
 class GenerateRequest(BaseModel):
+    sessions: list[str] = Field(default_factory=list)
     last: int = Field(5, ge=1, le=100)
     gap: int = Field(6, ge=2, le=100)
     per_session: int = Field(5, ge=1, le=50)
     limit: int = Field(30, ge=1, le=200)
     use_model: bool = True
     mode: str = Field("both", pattern="^(later|new-session|both)$")
+
+
+class DocsAdd(BaseModel):
+    path: str = Field(min_length=1, max_length=2000)
+    name: str = Field(min_length=1, max_length=64)
+    version: str = Field("", max_length=64)
+    description: str = Field("", max_length=500)
+    auto_inject: bool = False
+
+
+class DocsFlags(BaseModel):
+    enabled: bool | None = None
+    auto_inject: bool | None = None
+    version: str | None = Field(None, max_length=64)
+    description: str | None = Field(None, max_length=500)
+
+
+class DocsUpdate(BaseModel):
+    path: str | None = Field(None, max_length=2000)
+
+
+class RebuildReq(BaseModel):
+    replay: bool = False
+    reset: bool = False
+
+
+class RestoreReq(BaseModel):
+    backup: str = Field(min_length=1, max_length=200)
 
 
 class CandidateAccept(BaseModel):
@@ -297,9 +353,24 @@ def build_ui_router(orch) -> APIRouter:
         args = [sys.executable, "-m", "app.cli", "--config", cfg.source_path, "eval", "run",
                 "--variant", req.variants, "--repeats", str(req.repeats),
                 "--think", req.think if req.think in ("off", "on", "default") else "off"]
-        args += ["--last", "0"] if req.golden_only else ["--last", str(req.last)]
+        if req.sessions:
+            if not all(all(c.isalnum() or c in "-_.:#" for c in x) for x in req.sessions):
+                raise HTTPException(400, "bad session id")
+            args += ["--sessions", ",".join(req.sessions)]
+        else:
+            args += ["--last", "0"] if req.golden_only else ["--last", str(req.last), "--min-turns", str(req.min_turns)]
         if req.max_turns:
             args += ["--max-turns", str(req.max_turns)]
+        args += ["--memory", req.memory, "--seed", str(req.seed)]
+        if req.extract:
+            args.append("--extract")
+        if req.max_answer_tokens:
+            args += ["--max-answer-tokens", str(req.max_answer_tokens)]
+        if req.client_system.strip():
+            cs = cfg.logs_dir / f"eval-client-system-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+            cfg.logs_dir.mkdir(parents=True, exist_ok=True)
+            cs.write_text(req.client_system, encoding="utf-8")
+            args += ["--client-system", str(cs)]
         cfg.logs_dir.mkdir(parents=True, exist_ok=True)
         log_path = cfg.logs_dir / f"eval-ui-{time.strftime('%Y%m%d-%H%M%S')}.log"
         fh = open(log_path, "w", encoding="utf-8")
@@ -340,12 +411,171 @@ def build_ui_router(orch) -> APIRouter:
         from .eval_generate import generate
         recorded = load_recorded_sessions(cfg.conversations_dir)
         min_turns = req.gap if req.mode != "new-session" else 1
-        pick = [s for s in recorded.values() if len(s.turns) > min_turns][-req.last:]
+        if req.sessions:
+            pick = [recorded[x] for x in req.sessions if x in recorded]
+        else:
+            pick = [s for s in recorded.values() if len(s.turns) > min_turns][-req.last:]
         if not pick:
             raise HTTPException(400, f"No recorded sessions longer than {req.gap} turns yet.")
         async with orch.worker.lock:            # one memory-GPU job at a time
             return await generate(orch.db, pick, memory_client=orch.memory_client if req.use_model else None,
                                   gap=req.gap, per_session=req.per_session, limit=req.limit, mode=req.mode)
+
+    # ----------------------------------------------- memory: parity with the CLI
+    @router.get("/ui/api/memory/validate")
+    async def memory_validate():
+        return {"files": orch.manager.validate_files()}
+
+    @router.post("/ui/api/memory/rebuild")
+    async def memory_rebuild(req: RebuildReq):
+        from .rebuild import rebuild_memory
+        if req.reset and not req.replay:
+            raise HTTPException(400, "reset only makes sense with replay")
+        async with orch.worker.lock:
+            return rebuild_memory(orch, replay=req.replay, reset=req.reset)
+
+    @router.get("/ui/api/backups")
+    async def list_backups():
+        d = cfg.backups_dir
+        items = []
+        for p in sorted(d.iterdir(), reverse=True) if d.exists() else []:
+            if p.is_dir() and (p / "memory").is_dir():
+                items.append({"name": p.name, "files": sorted(x.name for x in (p / "memory").glob("*.md"))})
+        return {"backups": items}
+
+    @router.post("/ui/api/memory/restore")
+    async def memory_restore(req: RestoreReq):
+        if "/" in req.backup or "\\" in req.backup or ".." in req.backup:
+            raise HTTPException(400, "bad backup name")
+        try:
+            async with orch.worker.lock:
+                out = orch.manager.restore(cfg.backups_dir / req.backup)
+        except (FileNotFoundError, Exception) as e:
+            raise HTTPException(400, str(e)) from e
+        orch._bases.clear()
+        if orch.indexer is not None:
+            orch.queue_embed()
+        return out
+
+    @router.get("/ui/api/recorded-sessions")
+    async def eval_sessions():
+        from .evaluation import load_recorded_sessions
+        out = []
+        for sid, sess in load_recorded_sessions(cfg.conversations_dir).items():
+            out.append({"id": sid, "turns": len(sess.turns),
+                        "tool_calls": sum(len(t.tool_events) for t in sess.turns) // 2,
+                        "first": (sess.turns[0].user if sess.turns else "")[:120],
+                        "started": sess.turns[0].timestamp if sess.turns else ""})
+        return {"sessions": out[::-1]}
+
+    # ------------------------------------------------------ reference libraries
+    docs_task: dict[str, Any] = {}
+
+    def refs_or_409():
+        if orch.references is None:
+            raise HTTPException(409, "Reference libraries are disabled (references.enabled: false).")
+        return orch.references
+
+    def start_ingest(name: str, path: str | None, **kw):
+        refs = refs_or_409()
+        t = docs_task.get("task")
+        if t is not None and not t.done():
+            raise HTTPException(409, "Another library is being indexed; wait or cancel it.")
+        import asyncio as _a
+
+        async def run():
+            try:
+                await refs.ingest(name, path, lock=orch.worker.lock, **kw)
+            except BaseException:
+                pass                    # outcome is recorded in refs.job
+        docs_task["task"] = _a.create_task(run())
+
+    @router.get("/ui/api/docs")
+    async def docs_list():
+        refs = orch.references
+        return {"enabled": refs is not None, "libraries": refs.libraries() if refs else [],
+                "job": refs.job if refs else None,
+                "mcp_url": f"http://127.0.0.1:{cfg.application.port}/mcp",
+                "mcp_enabled": cfg.references.mcp_enabled,
+                "embeddings": orch.embedder is not None}
+
+    @router.post("/ui/api/docs/add")
+    async def docs_add(req: DocsAdd):
+        from .references import NAME_RE
+        if not NAME_RE.match(req.name):
+            raise HTTPException(400, "Name: letters, digits, _ . - only, starting with a letter or digit.")
+        if not Path(req.path).expanduser().exists():
+            raise HTTPException(400, f"{req.path} does not exist on this machine.")
+        if orch.references and orch.references.get(req.name):
+            raise HTTPException(409, f"A library named {req.name!r} exists; use Update instead.")
+        start_ingest(req.name, req.path, version=req.version, description=req.description,
+                     auto_inject=req.auto_inject)
+        return {"started": True}
+
+    @router.post("/ui/api/docs/{name}/update")
+    async def docs_update(name: str, req: DocsUpdate):
+        if not (orch.references and orch.references.get(name)):
+            raise HTTPException(404, "no such library")
+        if req.path and not Path(req.path).expanduser().exists():
+            raise HTTPException(400, f"{req.path} does not exist on this machine.")
+        start_ingest(name, req.path or None)
+        return {"started": True}
+
+    @router.post("/ui/api/docs/{name}/flags")
+    async def docs_flags(name: str, req: DocsFlags):
+        try:
+            return refs_or_409().set_flags(name, **req.model_dump())
+        except KeyError as e:
+            raise HTTPException(404, str(e)) from e
+
+    @router.post("/ui/api/docs/{name}/remove")
+    async def docs_remove(name: str):
+        t = docs_task.get("task")
+        if t is not None and not t.done() and (orch.references.job or {}).get("library") == name:
+            raise HTTPException(409, "This library is being indexed; cancel first.")
+        if not refs_or_409().remove(name):
+            raise HTTPException(404, "no such library")
+        return {"removed": name}
+
+    @router.post("/ui/api/docs/cancel")
+    async def docs_cancel():
+        refs_or_409().cancel()
+        return {"cancelling": True}
+
+    @router.get("/ui/api/docs/search")
+    async def docs_search(q: str, library: str | None = None, limit: int = 8):
+        refs = refs_or_409()
+        return {"results": refs.search(q, await orch.query_vector(q), libraries=[library] if library else None,
+                                       limit=max(1, min(30, limit)))}
+
+    @router.get("/ui/api/docs/lookup")
+    async def docs_lookup(symbol: str, library: str | None = None):
+        return {"results": refs_or_409().lookup(symbol, libraries=[library] if library else None, limit=8)}
+
+    @router.get("/ui/api/fs")
+    async def browse(path: str = ""):
+        """Folder picker for the Library tab (directories only; this server only listens on localhost)."""
+        import os
+        import string
+        if not path:
+            if os.name == "nt":
+                roots = [f"{d}:\\" for d in string.ascii_uppercase if Path(f"{d}:\\").exists()]
+            else:
+                roots = ["/", str(Path.home())]
+            return {"path": "", "parent": None, "dirs": roots, "files": 0}
+        p = Path(path).expanduser()
+        if not p.is_dir():
+            raise HTTPException(400, "not a folder")
+        dirs, files = [], 0
+        try:
+            for c in sorted(p.iterdir(), key=lambda x: x.name.lower()):
+                if c.is_dir() and not c.name.startswith("."):
+                    dirs.append(str(c))
+                elif c.is_file():
+                    files += 1
+        except PermissionError:
+            pass
+        return {"path": str(p), "parent": str(p.parent) if p.parent != p else "", "dirs": dirs[:500], "files": files}
 
     @router.post("/ui/api/candidates/{cid}/dismiss")
     async def dismiss(cid: int):
@@ -364,4 +594,4 @@ def csrf_guard_paths(path: str) -> bool:
     changes state (memory admin, settings, evals) needs a custom header, which a
     foreign web page cannot add without a CORS preflight this server never grants.
     """
-    return not (path.startswith("/api/") or path.startswith("/v1/") or path == "/chat" or path == "/api")
+    return not (path.startswith("/api/") or path.startswith("/v1/") or path in ("/chat", "/api", "/mcp"))

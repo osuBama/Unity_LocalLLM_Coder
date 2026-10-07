@@ -173,6 +173,19 @@ class HistoryRecallConfig(_Strict):
     chunk_chars: int = Field(1500, ge=200)
 
 
+class ReferencesConfig(_Strict):
+    """Documentation and code libraries the model can consult (README: reference libraries)."""
+    enabled: bool = True
+    chunk_tokens: int = Field(350, ge=80, le=2000)
+    half_precision: bool = True            # store vectors as float16: half the RAM, same ranking in practice
+    min_similarity: float = Field(0.35, ge=0, le=1)     # vector-only hits for searches the model asks for
+    auto_max_tokens: int = Field(800, ge=0)             # automatic excerpts per turn (0 = never automatic)
+    auto_top_k: int = Field(3, ge=1, le=10)
+    auto_min_similarity: float = Field(0.55, ge=0, le=1)  # stricter: nobody asked for these
+    mcp_enabled: bool = True               # docs_search / docs_lookup tools at /mcp
+    tool_max_tokens: int = Field(1500, ge=200, le=8000)  # cap on one tool result
+
+
 class SessionConfig(_Strict):
     summaries_enabled: bool = True
     summary_max_tokens: int = Field(400, ge=50, le=2000)
@@ -198,6 +211,7 @@ class Config(_Strict):
     thinking: ThinkingConfig = ThinkingConfig()
     embeddings: EmbeddingsConfig = EmbeddingsConfig()
     history_recall: HistoryRecallConfig = HistoryRecallConfig()
+    references: ReferencesConfig = ReferencesConfig()
 
     @model_validator(mode="after")
     def _check_compression(self):

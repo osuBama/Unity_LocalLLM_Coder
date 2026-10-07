@@ -138,6 +138,17 @@ pre { background: var(--paper); padding: 10px 12px; border-radius: 4px; overflow
 td.pass { color: var(--memory); }
 td.fail { color: var(--bad); }
 
+.progress { height: 10px; background: var(--paper); border-radius: 5px; overflow: hidden; margin: 8px 0; }
+.progress i { display: block; height: 100%; background: var(--memory); transition: width .3s; }
+.browser { border: 1px solid var(--line); border-radius: 4px; max-height: 260px; overflow-y: auto; margin-top: 8px; background: #fff; }
+.browser button { display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 5px 10px; cursor: pointer; font-family: var(--code); font-size: 13px; }
+.browser button:hover { background: var(--primary-tint); }
+.hit { border-bottom: 1px solid var(--line); padding: 10px 0; }
+.hit .t { font-weight: 600; }
+.hit .src { font-size: 12px; color: var(--ink-soft); }
+details > summary { cursor: pointer; color: var(--ink-soft); font-size: 14px; margin: 6px 0; }
+.sessions-pick { max-height: 200px; overflow-y: auto; border: 1px solid var(--line); border-radius: 4px; background: #fff; padding: 4px 8px; margin-top: 6px; }
+.sessions-pick label { display: flex; gap: 8px; font-size: 13px; padding: 2px 0; }
 .toast { position: fixed; right: 18px; bottom: 18px; max-width: 420px; background: var(--ink); color: #fff; padding: 10px 14px; border-radius: 4px; font-size: 14px; display: none; }
 .toast.show { display: block; }
 .toast.err { background: var(--bad); }
@@ -164,6 +175,7 @@ td.fail { color: var(--bad); }
   <button role="tab" data-view="overview" aria-selected="true">Overview</button>
   <button role="tab" data-view="chat" aria-selected="false">Chat</button>
   <button role="tab" data-view="memory" aria-selected="false">Memory</button>
+  <button role="tab" data-view="library" aria-selected="false">Library</button>
   <button role="tab" data-view="settings" aria-selected="false">Settings</button>
   <button role="tab" data-view="evals" aria-selected="false">Evals</button>
 </nav>
@@ -231,7 +243,55 @@ td.fail { color: var(--bad); }
     <button class="btn" id="m-reindex">Reindex for search</button>
     <button class="btn quiet" id="m-changes">Recent changes</button>
   </div>
+  <div class="row" style="margin-top:8px">
+    <button class="btn quiet" id="m-validate">Check memory files</button>
+    <button class="btn quiet" id="m-tasks">Background tasks</button>
+    <button class="btn quiet" id="m-sessions">Session summaries</button>
+    <button class="btn quiet" id="m-rebuild">Rebuild…</button>
+    <button class="btn quiet" id="m-restore">Restore from a backup…</button>
+  </div>
   <div id="m-out" style="margin-top: 12px"></div>
+</section>
+
+<!-- ======================================================= library -->
+<section class="view" id="view-library">
+  <p class="hint">Documentation and code the model can consult (Unity docs, packages, your own libraries), kept out of
+    memory and out of every prompt. The model looks things up on demand through the docs tools, and libraries marked
+    “automatic” also contribute short excerpts when a prompt clearly matches.</p>
+  <div class="panel" id="lib-job" hidden></div>
+  <h2>Libraries</h2>
+  <div class="panel scroll"><table id="lib-table"><thead><tr><th>Name</th><th>Version</th><th class="n">Files</th><th class="n">Sections</th>
+    <th class="n">Vectors</th><th>Enabled</th><th>Automatic</th><th>Source</th><th></th></tr></thead><tbody></tbody></table></div>
+
+  <h2>Add a library</h2>
+  <div class="panel">
+    <div class="row"><input type="text" id="lib-path" placeholder="Folder (or a single file) on this machine" style="flex:1; min-width: 280px" aria-label="Folder">
+      <button class="btn quiet" id="lib-browse">Browse…</button></div>
+    <div id="lib-browser" hidden></div>
+    <div class="row" style="margin-top:8px">
+      <input type="text" id="lib-name" placeholder="Name, e.g. unity-6" aria-label="Name" style="width: 200px">
+      <input type="text" id="lib-version" placeholder="Version, e.g. 6000.0" aria-label="Version" style="width: 160px">
+      <input type="text" id="lib-desc" placeholder="Description (shown to the model)" aria-label="Description" style="flex:1; min-width: 220px">
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label class="inline"><input type="checkbox" id="lib-auto"> Add relevant excerpts to prompts automatically</label>
+      <button class="btn go" id="lib-add">Add and index</button>
+    </div>
+    <p class="hint" style="margin-top:8px">Indexes Markdown, HTML, text, C#, Python, JS/TS and shader files; skips Library, Temp, obj, bin,
+      .git and node_modules. C# is split per class and member with its doc comments. Re-indexing only processes changed files.</p>
+  </div>
+
+  <h2>Search the libraries</h2>
+  <div class="row">
+    <input type="text" id="ls-q" placeholder="e.g. move a kinematic rigidbody, or Rigidbody.MovePosition" style="flex:1; min-width: 260px" aria-label="Query">
+    <select id="ls-lib" aria-label="Library"><option value="">all libraries</option></select>
+    <select id="ls-mode" aria-label="Mode"><option value="search">Search</option><option value="lookup">Exact symbol</option></select>
+    <button class="btn" id="ls-go">Search</button>
+  </div>
+  <div class="panel" id="ls-out" hidden style="margin-top:12px"></div>
+
+  <h2>How the model reaches them</h2>
+  <div class="panel a" id="lib-mcp"></div>
 </section>
 
 <!-- ====================================================== settings -->
@@ -257,6 +317,22 @@ td.fail { color: var(--bad); }
       <label class="inline"><input type="checkbox" id="ev-golden"> Golden questions only</label>
       <button class="btn go" id="ev-run">Start evaluation</button>
     </div>
+    <details><summary>More options</summary>
+      <div class="row" style="margin-top:6px">
+        <label class="inline">Memory <select id="ev-memory"><option value="asof">as it was at the time (no future knowledge)</option><option value="current">today's memory</option><option value="empty">empty</option></select></label>
+        <label class="inline">Max turns per session <input type="number" id="ev-maxturns" min="1" style="width:80px" placeholder="all"></label>
+        <label class="inline">Skip sessions shorter than <input type="number" id="ev-minturns" value="4" min="1" style="width:64px"> turns</label>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label class="inline">Seed <input type="number" id="ev-seed" value="42" style="width:80px"></label>
+        <label class="inline">Answer length limit <input type="number" id="ev-maxans" min="16" style="width:90px" placeholder="auto"></label>
+        <label class="inline"><input type="checkbox" id="ev-extract"> Run memory extraction during replay</label>
+      </div>
+      <label class="hint" style="display:block;margin-top:8px">Your client's real system prompt (optional, for realistic absolute numbers)</label>
+      <textarea id="ev-client" rows="3" placeholder="Paste OpenClaw's system prompt here"></textarea>
+      <div style="margin-top:8px"><span class="hint">Specific sessions (overrides “Last sessions”):</span>
+        <div class="sessions-pick" id="ev-sessions"><span class="hint">loading…</span></div></div>
+    </details>
     <pre id="ev-log" hidden></pre>
   </div>
 
@@ -275,6 +351,8 @@ td.fail { color: var(--bad); }
       <input type="number" id="gen-per" value="5" min="1" max="50" style="width:64px" aria-label="Per session"><span>per session.</span>
       <label class="inline">Ask them <select id="gen-mode"><option value="both">both ways</option><option value="later">later in the same session</option><option value="new-session">in a new conversation</option></select></label>
       <label class="inline"><input type="checkbox" id="gen-model" checked> Word them with the memory model</label>
+      <label class="inline">At most <input type="number" id="gen-limit" value="30" min="1" max="200" style="width:64px"> questions</label>
+      <label class="inline"><input type="checkbox" id="gen-picked"> Only the sessions ticked under “More options”</label>
       <button class="btn go" id="gen-go">Generate questions</button>
     </div>
   </div>
@@ -317,7 +395,7 @@ function show(view) {
   $$("nav.tabs button").forEach(b => b.setAttribute("aria-selected", b.dataset.view === view));
   $$("section.view").forEach(s => s.classList.toggle("on", s.id === "view-" + view));
   location.hash = view;
-  ({ memory: loadMemory, settings: loadSettings, evals: loadEvals }[view] || (() => {}))();
+  ({ memory: loadMemory, settings: loadSettings, evals: loadEvals, library: loadLibrary }[view] || (() => {}))();
 }
 
 /* -------------------------------------------- header lanes + overview */
@@ -515,6 +593,140 @@ $("#m-changes").onclick = ev => busy(ev.target, async () => {
   out(`<div class="panel scroll"><table><tr><th>When</th><th>Status</th><th>Operation</th><th>Entry</th><th>Title</th><th>Detail</th></tr>${r.changes.map(c => `<tr><td>${esc((c.created_at || "").replace("T", " ").slice(0, 16))}</td><td class="${c.status === "approved" ? "pass" : c.status === "rejected" ? "fail" : ""}">${esc(c.status)}</td><td>${esc(c.operation)}</td><td>${esc(c.entry_key || "")}</td><td>${esc(c.title || "")}</td><td>${esc(c.status_detail || c.reason || "")}</td></tr>`).join("")}</table></div>`);
 });
 
+$("#m-validate").onclick = ev => busy(ev.target, async () => {
+  const r = await api("/ui/api/memory/validate");
+  out(`<div class="panel"><h3>Memory files</h3><table><tr><th>File</th><th>Status</th><th class="n">Entries</th><th class="n">Active</th><th class="n">Size (tokens)</th><th>Notes</th></tr>${r.files.map(f => `<tr><td>${esc(f.file)}</td><td class="${f.ok ? "pass" : "fail"}">${f.ok ? "OK" : "problem"}</td><td class="n">${f.entries}</td><td class="n">${f.active}</td><td class="n">${fmt(f.tokens)}</td><td>${esc(f.error || (f.warnings || []).join("; "))}</td></tr>`).join("")}</table></div>`);
+});
+$("#m-tasks").onclick = ev => busy(ev.target, async () => {
+  const r = await api("/memory/tasks?limit=60");
+  out(`<div class="panel scroll"><h3>Background tasks on the memory GPU</h3><p class="hint">${Object.entries(r.counts).map(([k, v]) => `${v} ${k}`).join(", ") || "none"}</p>
+    <table><tr><th>#</th><th>Kind</th><th>Status</th><th class="n">Attempts</th><th>Conversation</th><th>Updated</th><th class="n">Seconds</th><th>Last error</th></tr>${r.tasks.map(t => `<tr><td>${t.id}</td><td>${esc(t.kind || "")}</td><td class="${t.status === "failed" ? "fail" : t.status === "done" ? "pass" : ""}">${esc(t.status)}</td><td class="n">${t.attempts}</td><td>${esc(t.conversation_id || "")}</td><td>${esc((t.updated_at || "").replace("T", " ").slice(0, 19))}</td><td class="n">${fmt(t.duration_seconds, 2)}</td><td>${esc(t.last_error || "")}</td></tr>`).join("")}</table></div>`);
+});
+$("#m-sessions").onclick = ev => busy(ev.target, async () => {
+  const r = await api("/memory/sessions?limit=30");
+  out(`<div class="panel"><h3>Session summaries</h3>${r.sessions.map(x => `<div class="hit"><div class="t">${esc(x.conversation_id)}</div><div class="src">turns 1–${x.covered_turns}, updated ${esc((x.updated_at || "").replace("T", " ").slice(0, 16))}</div><pre>${esc(x.summary)}</pre></div>`).join("") || `<p class="hint">No summaries yet.</p>`}</div>`);
+});
+$("#m-rebuild").onclick = () => {
+  out(`<div class="panel"><h3>Rebuild</h3><p class="hint">Plain rebuild refreshes the search index from the memory files. Replay re-runs all recorded conversations through the memory model (this takes a while). Reset first empties memory, so it is rebuilt purely from history. A backup is always taken first.</p>
+    <div class="row"><label class="inline"><input type="checkbox" id="rb-replay"> Replay history</label><label class="inline"><input type="checkbox" id="rb-reset"> Reset memory first</label><button class="btn danger" id="rb-go">Rebuild</button></div></div>`);
+  $("#rb-reset").onchange = () => { if ($("#rb-reset").checked) $("#rb-replay").checked = true; };
+  $("#rb-go").onclick = ev => busy(ev.target, async () => {
+    const replay = $("#rb-replay").checked, reset = $("#rb-reset").checked;
+    if (reset && !confirm("Empty memory and rebuild it from recorded history? A backup is taken first.")) return;
+    const r = await post("/ui/api/memory/rebuild", { replay, reset });
+    toast("Rebuild done"); out(`<p class="hint">Backup: ${esc(r.backup)}. ${r.queued != null ? `${r.queued} conversations queued for the memory model, ${r.skipped} skipped. ` : ""}${r.db_entries} entries indexed.</p>`); loadMemory();
+  });
+};
+$("#m-restore").onclick = ev => busy(ev.target, async () => {
+  const r = await api("/ui/api/backups");
+  out(`<div class="panel"><h3>Restore memory from a backup</h3>${r.backups.length ? `<p class="hint">The current memory is backed up before restoring.</p>
+    <div class="row"><select id="rs-pick">${r.backups.map(b => `<option value="${esc(b.name)}">${esc(b.name)} (${b.files.length} files)</option>`).join("")}</select><button class="btn danger" id="rs-go">Restore</button></div>` : `<p class="hint">No backups yet.</p>`}</div>`);
+  const go = $("#rs-go");
+  if (go) go.onclick = ev2 => busy(ev2.target, async () => {
+    const name = $("#rs-pick").value;
+    if (!confirm(`Replace the current memory with backup ${name}?`)) return;
+    const x = await post("/ui/api/memory/restore", { backup: name });
+    toast(`Restored ${x.files.length} files`); out(`<p class="hint">Restored from ${esc(name)}. The previous state was saved to ${esc(x.pre_restore_backup)}.</p>`); loadMemory();
+  });
+});
+
+/* --------------------------------------------------------- library */
+let libTimer = null;
+async function loadLibrary() {
+  let r; try { r = await api("/ui/api/docs"); } catch (e) { return toast(e.message, true); }
+  if (!r.enabled) { $("#lib-table tbody").innerHTML = `<tr><td colspan="9" class="hint">Reference libraries are disabled (references.enabled in config.yaml).</td></tr>`; return; }
+  $("#lib-table tbody").innerHTML = r.libraries.map(l => `<tr data-l="${esc(l.name)}">
+    <td><b>${esc(l.name)}</b>${l.description ? `<div class="hint" style="margin:0">${esc(l.description)}</div>` : ""}</td>
+    <td>${esc(l.version || "–")}</td><td class="n">${fmt(l.files)}</td><td class="n">${fmt(l.chunks)}</td><td class="n">${l.vector_bytes >= 1e5 ? fmt(l.vector_bytes / 1e6, 1) + " MB" : fmt(l.vector_bytes / 1e3) + " KB"}</td>
+    <td><input type="checkbox" data-f="enabled" ${l.enabled ? "checked" : ""} aria-label="Enabled"></td>
+    <td><input type="checkbox" data-f="auto_inject" ${l.auto_inject ? "checked" : ""} aria-label="Automatic excerpts"></td>
+    <td><code>${esc(l.source_path)}</code></td>
+    <td style="white-space:nowrap"><button class="btn quiet" data-a="update">Re-index</button> <button class="btn quiet" data-a="edit">Edit</button> <button class="btn danger" data-a="remove">Remove</button></td></tr>`).join("")
+    || `<tr><td colspan="9" class="hint">No libraries yet. Add a folder below, for example Unity's offline documentation or a package's source.</td></tr>`;
+  $("#ls-lib").innerHTML = `<option value="">all libraries</option>` + r.libraries.map(l => `<option>${esc(l.name)}</option>`).join("");
+  $$("#lib-table [data-l]").forEach(row => {
+    const name = row.dataset.l;
+    $$("input[data-f]", row).forEach(cb => cb.onchange = async () => {
+      try { await post(`/ui/api/docs/${encodeURIComponent(name)}/flags`, { [cb.dataset.f]: cb.checked }); toast(`${name}: ${cb.dataset.f === "enabled" ? (cb.checked ? "enabled" : "disabled") : "automatic excerpts " + (cb.checked ? "on" : "off")}`); }
+      catch (e) { toast(e.message, true); cb.checked = !cb.checked; }
+    });
+    $("[data-a=update]", row).onclick = ev => busy(ev.target, async () => { await post(`/ui/api/docs/${encodeURIComponent(name)}/update`, {}); toast(`Re-indexing ${name}`); pollLibJob(); });
+    $("[data-a=remove]", row).onclick = ev => busy(ev.target, async () => { if (!confirm(`Remove ${name} and its index?`)) return; await post(`/ui/api/docs/${encodeURIComponent(name)}/remove`); toast(`Removed ${name}`); loadLibrary(); });
+    $("[data-a=edit]", row).onclick = () => {
+      const l = r.libraries.find(x => x.name === name);
+      if ($(".lib-edit", row.nextElementSibling || document.createElement("tr"))) return;
+      const tr = document.createElement("tr"); tr.innerHTML = `<td colspan="9"><div class="row lib-edit"><input type="text" value="${esc(l.version)}" placeholder="Version" style="width:140px" aria-label="Version">
+        <input type="text" value="${esc(l.description)}" placeholder="Description" style="flex:1" aria-label="Description"><input type="text" value="${esc(l.source_path)}" placeholder="Source folder" style="flex:1" aria-label="Source folder">
+        <button class="btn go">Save</button><button class="btn quiet">Cancel</button></div></td>`;
+      row.after(tr);
+      const [v, d, src] = $$("input", tr), [save, cancel] = $$("button", tr);
+      cancel.onclick = () => tr.remove();
+      save.onclick = ev => busy(ev.target, async () => {
+        await post(`/ui/api/docs/${encodeURIComponent(name)}/flags`, { version: v.value, description: d.value });
+        if (src.value !== l.source_path) { await post(`/ui/api/docs/${encodeURIComponent(name)}/update`, { path: src.value }); toast("Saved; re-indexing from the new folder"); pollLibJob(); }
+        else toast("Saved");
+        loadLibrary();
+      });
+    };
+  });
+  const snippet = JSON.stringify({ mcp: { servers: { "local-docs": { url: r.mcp_url, transport: "streamable-http" } } } }, null, 2);
+  $("#lib-mcp").innerHTML = `<dl class="facts"><dt>On demand (tools)</dt><dd>${r.mcp_enabled ? `docs_search, docs_lookup and docs_libraries at <code>${esc(r.mcp_url)}</code>` : `<span class="flag">off</span> (Settings, Reference libraries)`}</dd>
+    <dt>Automatic</dt><dd>Libraries with “Automatic” ticked add up to the excerpt budget set in Settings when a prompt clearly matches</dd>
+    <dt>Embeddings</dt><dd>${r.embeddings ? "on: search understands meaning as well as exact words" : `<span class="flag">off</span>: keyword search only`}</dd></dl>
+    <p class="hint" style="margin-top:10px">setup.ps1 registers the tools with OpenClaw. To do it by hand, merge this into <code>~/.openclaw/openclaw.json</code>, then run <code>openclaw gateway restart</code> and <code>openclaw mcp probe local-docs</code>:</p>
+    <pre id="mcp-snippet">${esc(snippet)}</pre><button class="btn quiet" id="mcp-copy">Copy</button>`;
+  $("#mcp-copy").onclick = () => navigator.clipboard.writeText(snippet).then(() => toast("Copied"), () => toast("Copy failed; select the text instead", true));
+  renderLibJob(r.job);
+  if (r.job && !r.job.finished) pollLibJob();
+}
+function renderLibJob(j) {
+  const box = $("#lib-job");
+  if (!j) { box.hidden = true; return; }
+  box.hidden = false;
+  const pctDone = j.total ? Math.round(100 * j.done / j.total) : (j.finished ? 100 : 0);
+  const sc = j.scan ? `${j.scan.files_changed} files indexed, ${j.scan.files_unchanged} unchanged, ${j.scan.files_removed} removed. ` : "";
+  const label = { scanning: "Reading files…", embedding: `Embedding sections on the memory GPU: ${j.done} of ${j.total}`, done: "Finished", failed: "Failed", cancelled: "Cancelled" }[j.phase] || j.phase;
+  box.innerHTML = `<h3>${esc(j.library)}: ${esc(label)}</h3><div class="progress" role="progressbar" aria-valuenow="${pctDone}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pctDone}%"></i></div>
+    <p class="hint">${esc(sc)}${j.error ? `<span class="flag">${esc(j.error)}</span>` : ""}${j.finished ? "" : " Regular memory work keeps running between batches."}</p>
+    ${j.finished ? "" : `<button class="btn danger" id="lib-cancel">Cancel</button>`}`;
+  const c = $("#lib-cancel"); if (c) c.onclick = ev => busy(ev.target, async () => { await post("/ui/api/docs/cancel"); toast("Cancelling after the current batch"); });
+}
+async function pollLibJob() {
+  clearTimeout(libTimer);
+  let r; try { r = await api("/ui/api/docs"); } catch { return; }
+  renderLibJob(r.job);
+  if (r.job && !r.job.finished) libTimer = setTimeout(pollLibJob, 1500);
+  else if (r.job) { loadLibrary(); if (r.job.phase === "done") toast(`${r.job.library} indexed`); }
+}
+$("#lib-add").onclick = ev => busy(ev.target, async () => {
+  const body = { path: $("#lib-path").value.trim(), name: $("#lib-name").value.trim(), version: $("#lib-version").value.trim(),
+                 description: $("#lib-desc").value.trim(), auto_inject: $("#lib-auto").checked };
+  if (!body.path || !body.name) throw new Error("Folder and name are required.");
+  await post("/ui/api/docs/add", body); toast(`Indexing ${body.name}`);
+  $("#lib-name").value = $("#lib-version").value = $("#lib-desc").value = ""; pollLibJob();
+});
+async function browse(path) {
+  const r = await api(`/ui/api/fs?path=${encodeURIComponent(path || "")}`);
+  const box = $("#lib-browser"); box.hidden = false;
+  box.innerHTML = `<div class="row" style="margin-top:8px"><code>${esc(r.path || "Drives")}</code>${r.path ? `<span class="hint" style="margin:0">${r.files} files here</span><button class="btn go" id="br-use">Use this folder</button>` : ""}<button class="btn quiet" id="br-close">Close</button></div>
+    <div class="browser">${r.parent != null && r.path ? `<button data-p="${esc(r.parent)}">.. (up)</button>` : ""}${r.dirs.map(d => `<button data-p="${esc(d)}">${esc(d.split(/[\\/]/).filter(Boolean).pop() || d)}</button>`).join("") || `<p class="hint" style="padding:6px 10px">No subfolders.</p>`}</div>`;
+  $$(".browser button", box).forEach(b => b.onclick = () => browse(b.dataset.p).catch(e => toast(e.message, true)));
+  $("#br-close").onclick = () => { box.hidden = true; };
+  const use = $("#br-use"); if (use) use.onclick = () => { $("#lib-path").value = r.path; if (!$("#lib-name").value) $("#lib-name").value = r.path.split(/[\\/]/).filter(Boolean).pop().toLowerCase().replace(/[^a-z0-9_.-]+/g, "-"); box.hidden = true; };
+}
+$("#lib-browse").onclick = ev => busy(ev.target, () => browse($("#lib-path").value.trim()));
+$("#ls-go").onclick = ev => busy(ev.target, async () => {
+  const q = $("#ls-q").value.trim(); if (!q) return;
+  const lib = $("#ls-lib").value, mode = $("#ls-mode").value;
+  const r = mode === "lookup" ? await api(`/ui/api/docs/lookup?symbol=${encodeURIComponent(q)}${lib ? `&library=${encodeURIComponent(lib)}` : ""}`)
+                              : await api(`/ui/api/docs/search?q=${encodeURIComponent(q)}${lib ? `&library=${encodeURIComponent(lib)}` : ""}`);
+  const o = $("#ls-out"); o.hidden = false;
+  o.innerHTML = r.results.map(h => `<div class="hit"><div class="t">${esc(h.title)}</div>
+    <div class="src">${esc(h.library)}${h.version ? " " + esc(h.version) : ""} | ${esc(h.path)}${h.similarity != null ? ` | similarity ${h.similarity}` : ""}${h.keyword ? " | keyword match" : ""} | ${h.tokens} tokens</div>
+    <details><summary>Show text</summary><pre>${esc(h.text)}</pre></details></div>`).join("") || `<p class="hint">Nothing found${mode === "lookup" ? ". Try Search, or a shorter name (e.g. AddForce)" : ""}.</p>`;
+});
+$("#ls-q").addEventListener("keydown", e => { if (e.key === "Enter") $("#ls-go").click(); });
+
 /* -------------------------------------------------------- settings */
 let settings = [], edits = {};
 async function loadSettings() {
@@ -564,10 +776,24 @@ async function loadEvals() {
     || `<tr><td colspan="7" class="hint">No reports yet. Start an evaluation above.</td></tr>`;
   $$("#ev-reports [data-r]").forEach(c => c.onchange = () => { c.checked ? selected.add(c.dataset.r) : selected.delete(c.dataset.r); $("#ev-compare").disabled = selected.size < 1; });
   $("#ev-compare").disabled = selected.size < 1;
-  loadCandidates(); pollRun(true);
+  loadCandidates(); pollRun(true); loadEvalSessions();
+}
+async function loadEvalSessions() {
+  try {
+    const r = await api("/ui/api/recorded-sessions");
+    const ticked = new Set($$("#ev-sessions input:checked").map(c => c.value));
+    $("#ev-sessions").innerHTML = r.sessions.map(x => `<label><input type="checkbox" value="${esc(x.id)}" ${ticked.has(x.id) ? "checked" : ""}>
+      <span class="num">${esc((x.started || "").slice(0, 16).replace("T", " "))}</span><span>${x.turns} turns, ${x.tool_calls} tool calls</span><span class="hint" style="margin:0">${esc(x.first)}</span></label>`).join("")
+      || `<span class="hint">No recorded sessions yet.</span>`;
+  } catch (e) { $("#ev-sessions").innerHTML = `<span class="flag">${esc(e.message)}</span>`; }
 }
 $("#ev-run").onclick = ev => busy(ev.target, async () => {
-  await post("/ui/api/evals/run", { variants: $("#ev-variants").value.trim(), last: +$("#ev-last").value, repeats: +$("#ev-repeats").value, think: $("#ev-think").value, golden_only: $("#ev-golden").checked });
+  const picked = $$("#ev-sessions input:checked").map(c => c.value);
+  await post("/ui/api/evals/run", { variants: $("#ev-variants").value.trim(), last: +$("#ev-last").value, repeats: +$("#ev-repeats").value,
+    think: $("#ev-think").value, golden_only: $("#ev-golden").checked, sessions: picked, memory: $("#ev-memory").value,
+    extract: $("#ev-extract").checked, seed: +$("#ev-seed").value, min_turns: +$("#ev-minturns").value,
+    max_turns: $("#ev-maxturns").value ? +$("#ev-maxturns").value : null,
+    max_answer_tokens: $("#ev-maxans").value ? +$("#ev-maxans").value : null, client_system: $("#ev-client").value });
   toast("Evaluation started"); pollRun();
 });
 async function pollRun(once = false) {
@@ -633,11 +859,12 @@ async function loadCandidates() {
       : `<dl class="facts"><dt>Asked</dt><dd>${esc(c.question)}</dd><dt>Answered</dt><dd>${esc(c.wrong_answer.slice(0, 300))}</dd><dt>Your correction</dt><dd>${esc(c.correction)}</dd></dl>`}
     <div class="row" style="margin-top:10px"><label class="inline">Answer must contain <input type="text" data-f="expect" value="${esc(c.suggested_expect.join(", "))}" size="24"></label>
       <label class="inline">must not contain <input type="text" data-f="forbid" value="${esc((c.suggested_forbid || []).join(", "))}" size="18"></label>
+      <label class="inline">name <input type="text" data-f="name" placeholder="${c.kind === "generated" ? "generated" : "correction"}-${c.id}" size="16"></label>
       <button class="btn go" data-a="accept">Accept</button><button class="btn quiet" data-a="dismiss">Dismiss</button></div></div>`).join("")
     || `<p class="hint">Nothing waiting. Corrections like “no, it's 11435” appear here, and so do generated questions.</p>`;
   $$("#ev-cands [data-c]").forEach(p => {
     const id = p.dataset.c, list = f => $(`[data-f=${f}]`, p).value.split(",").map(s => s.trim()).filter(Boolean);
-    $("[data-a=accept]", p).onclick = ev => busy(ev.target, async () => { const r = await post(`/ui/api/candidates/${id}/accept`, { expect: list("expect"), forbid: list("forbid") }); toast(`Added ${r.case.name} to golden.yaml`); loadCandidates(); });
+    $("[data-a=accept]", p).onclick = ev => busy(ev.target, async () => { const r = await post(`/ui/api/candidates/${id}/accept`, { expect: list("expect"), forbid: list("forbid"), name: $("[data-f=name]", p).value.trim() || null }); toast(`Added ${r.case.name} to golden.yaml`); loadCandidates(); });
     $("[data-a=dismiss]", p).onclick = ev => busy(ev.target, async () => { await post(`/ui/api/candidates/${id}/dismiss`); loadCandidates(); });
   });
 }
@@ -645,7 +872,8 @@ async function loadCandidates() {
 $("#gen-go").onclick = ev => busy(ev.target, async () => {
   toast("Generating questions on the memory GPU…");
   const r = await post("/ui/api/candidates/generate", { last: +$("#gen-last").value, gap: +$("#gen-gap").value,
-    per_session: +$("#gen-per").value, use_model: $("#gen-model").checked, mode: $("#gen-mode").value });
+    per_session: +$("#gen-per").value, use_model: $("#gen-model").checked, mode: $("#gen-mode").value,
+    limit: +$("#gen-limit").value, sessions: $("#gen-picked").checked ? $$("#ev-sessions input:checked").map(c => c.value) : [] });
   toast(`${r.created.length} new questions (${r.by_wording.model} worded by the model, ${r.by_wording["fill-in-the-blank"]} fill-in-the-blank)${r.skipped_duplicates ? `, ${r.skipped_duplicates} already existed` : ""}`);
   loadCandidates();
 });
@@ -663,7 +891,7 @@ $("#cand-accept-all").onclick = ev => busy(ev.target, async () => {
 
 /* ------------------------------------------------------------ start */
 refreshStatus(); setInterval(() => { if (!document.hidden) refreshStatus(); }, 5000);
-const initial = location.hash.slice(1); if (["overview", "chat", "memory", "settings", "evals"].includes(initial)) show(initial);
+const initial = location.hash.slice(1); if (["overview", "chat", "memory", "library", "settings", "evals"].includes(initial)) show(initial);
 </script>
 </body>
 </html>

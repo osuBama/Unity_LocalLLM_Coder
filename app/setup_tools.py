@@ -300,7 +300,9 @@ def openclaw_patch(model: str, ctx: int, base_url: str = "http://127.0.0.1:8000"
         "baseUrl": base_url, "api": "ollama", "apiKey": "ollama-local", "timeoutSeconds": 600,
         "models": [{"id": model, "name": model, "reasoning": reasoning, "input": ["text"],
                     "contextWindow": ctx, "maxTokens": max_tokens, "params": {"keep_alive": "30m"}}]}}},
-        "agents": {"defaults": {"model": {"primary": f"ollama/{model}"}}}}
+        "agents": {"defaults": {"model": {"primary": f"ollama/{model}"}}},
+        # Reference-library tools (docs_search / docs_lookup) served by the orchestrator.
+        "mcp": {"servers": {"local-docs": {"url": base_url.rstrip("/") + "/mcp", "transport": "streamable-http"}}}}
 
 
 # -------------------------------------------------------------------- CLI

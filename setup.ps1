@@ -438,6 +438,11 @@ else {
                     ('openclaw config set models.providers.ollama "$(cat {0}/provider.json)" --strict-json' -f $tmp)) -join "`n")
                 if ($r.Code -eq 0) {
                     $applied = $true; Ok "Set with 'openclaw config set'"
+                    $mcpJson = '{"url":"http://127.0.0.1:' + $OrchestratorPort + '/mcp","transport":"streamable-http"}'
+                    $mr = Wsl-Bash $distro (@("mkdir -p $tmp", (Heredoc "$tmp/mcp.json" $mcpJson),
+                        ('openclaw config set mcp.servers.local-docs "$(cat {0}/mcp.json)" --strict-json' -f $tmp)) -join "`n")
+                    if ($mr.Code -eq 0) { Ok "Docs tools registered (MCP server local-docs)" }
+                    else { Warn "Register the docs tools yourself: .\ai docs mcp shows the snippet" }
                     $ms = Wsl-Bash $distro "openclaw models set ollama/$PrimaryModel"
                     if ($ms.Code -eq 0) { Ok "Default model ollama/$PrimaryModel" }
                     else { Warn "Set the default model yourself: openclaw models set ollama/$PrimaryModel" }
@@ -452,6 +457,11 @@ else {
             } else {
                 $rs = Wsl-Bash $distro 'openclaw gateway restart'
                 if ($rs.Code -eq 0) { Ok "Gateway restarted" } else { Warn "Restart the gateway yourself: openclaw gateway restart" }
+                if ($health) {
+                    $pr = Wsl-Bash $distro 'openclaw mcp probe local-docs 2>&1 | tail -5'
+                    if ($pr.Code -eq 0 -and $pr.Out -match "docs_search") { Ok "OpenClaw sees the docs tools (docs_search, docs_lookup)" }
+                    else { Info "Could not confirm the docs tools yet; check later with: openclaw mcp probe local-docs" }
+                }
             }
             Wsl-Bash $distro "rm -rf $tmp" | Out-Null
             $script:Summary["OpenClaw"] = if ($applied) { "configured in '$distro'" } else { "manual merge needed" }

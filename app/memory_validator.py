@@ -35,7 +35,7 @@ _INJECTION = [
                r"(previous|prior|above|earlier|your|system)\s+(instruction|prompt|rule|message)s?\b", re.I),
     re.compile(r"\byou (are|must) now\b", re.I),
     re.compile(r"\bnew (system )?instructions?\s*:", re.I),
-    re.compile(r"</?\s*(PROJECT_MEMORY_BASE|PROJECT_MEMORY|EXTERNAL_MEMORY|USER_REQUEST|system|assistant|user)\s*>", re.I),
+    re.compile(r"</?\s*(PROJECT_MEMORY_BASE|PROJECT_MEMORY|EXTERNAL_MEMORY|USER_REQUEST|REFERENCE|system|assistant|user)\s*>", re.I),
     re.compile(r"<\|im_(start|end)\|>"),
 ]
 
