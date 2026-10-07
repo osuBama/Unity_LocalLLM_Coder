@@ -79,6 +79,8 @@ class Orchestrator:
         self._recent: dict[str, deque] = {}
         self._turns: dict[str, int] = {}
         self._bases: OrderedDict[tuple, StableSnapshot] = OrderedDict()
+        from .tool_acl import ToolACL
+        self.tools_acl = ToolACL(self)
         self.references = None
         if config.references.enabled:
             from .references import References

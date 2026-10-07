@@ -130,20 +130,30 @@ def tool_events_since(messages: list[dict], start: int) -> list[dict]:
 
 
 class _StreamAccumulator:
-    """Parses Ollama NDJSON as it streams; optionally strips memory flags.
+    """Parses Ollama NDJSON as it streams; strips memory flags; applies tool access control.
 
-    Without a stripper, bytes are relayed exactly as received. With one, lines
-    carrying message.content are re-serialised with the flag text removed.
+    Lines that need no change are relayed byte-for-byte. Lines carrying flag text or
+    tool calls that must be filtered (blocked tools, the internal load_tools call) are
+    re-serialised. When the model asked to load tools and another round is allowed, the
+    final `done` line is held back: the proxy continues with a follow-up request.
     """
 
-    def __init__(self, stripper: FlagStripper | None = None):
+    def __init__(self, stripper: FlagStripper | None = None, acl=None, allow_load: bool = False):
         self.stripper = stripper
+        self.acl = acl
+        self.allow_load = allow_load
         self.buf = b""
         self.content: list[str] = []
         self.tool_calls: list[Any] = []
+        self.blocked: list[str] = []
+        self.load: list[str] = []
         self.final: dict = {}
         self.first_token_at: float | None = None
         self.error: str | None = None
+
+    @property
+    def transforms(self) -> bool:
+        return self.stripper is not None or self.acl is not None
 
     def feed(self, chunk: bytes, now: float) -> bytes:
         self.buf += chunk
@@ -151,14 +161,12 @@ class _StreamAccumulator:
         while b"\n" in self.buf:
             line, self.buf = self.buf.split(b"\n", 1)
             out.append(self._line(line, now))
-        if self.stripper is None:
-            return chunk
-        return b"".join(out)
+        return b"".join(out) if self.transforms else chunk
 
     def close(self, now: float) -> bytes:
         rest, self.buf = self.buf, b""
         emitted = self._line(rest, now) if rest.strip() else b""
-        return b"" if self.stripper is None else emitted
+        return emitted if self.transforms else b""
 
     def _line(self, line: bytes, now: float) -> bytes:
         raw = line + b"\n"
@@ -175,27 +183,51 @@ class _StreamAccumulator:
         msg = obj.get("message") or {}
         content = msg.get("content") or ""
         done = bool(obj.get("done"))
+        changed = False
         if self.stripper is not None:
             visible = self.stripper.feed(content)
             if done:
                 visible += self.stripper.finish()
         else:
             visible = content
-        if visible:
-            self.content.append(visible)
-            if self.first_token_at is None:
-                self.first_token_at = now
-        if msg.get("tool_calls"):
-            self.tool_calls.extend(msg["tool_calls"])
+        changed |= visible != content
+        calls = msg.get("tool_calls") or []
+        if calls and self.acl is not None:
+            keep, blocked, load = self.acl.classify_calls(calls)
+            self.blocked += blocked
+            if load:
+                if self.allow_load:
+                    self.load += load
+                else:
+                    self.blocked.append(self.acl.cfg.meta_tool_name)
+            if len(keep) != len(calls):
+                changed, calls = True, keep
+        if calls:
+            self.tool_calls.extend(calls)
             if self.first_token_at is None:
                 self.first_token_at = now
         if done:
             self.final = obj
-        if self.stripper is None or visible == content:
+            if self.load and self.allow_load:
+                return b""              # a follow-up round continues this response
+            if self.blocked and not self.tool_calls:
+                note = self.acl.blocked_note(self.blocked)
+                visible = f"{visible}\n\n{note}" if visible else note
+                changed = True
+        if visible:
+            self.content.append(visible)
+            if self.first_token_at is None:
+                self.first_token_at = now
+        if not changed:
             return raw
-        if not visible and not done and not msg.get("tool_calls") and not msg.get("thinking"):
-            return b""  # chunk was entirely flag text (or held back)
-        obj["message"] = {**msg, "content": visible}
+        if not visible and not done and not calls and not msg.get("thinking"):
+            return b""                  # nothing left to show in this chunk
+        new_msg = {**msg, "content": visible}
+        if calls:
+            new_msg["tool_calls"] = calls
+        else:
+            new_msg.pop("tool_calls", None)
+        obj["message"] = new_msg
         return (json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
@@ -379,9 +411,12 @@ def build_router(orch: Orchestrator) -> APIRouter:
         uidx = last_user_index(original)
         user_text = original[uidx].get("content") if uidx is not None else None
         messages = original
+        if orch.tools_acl is not None and body.get("tools"):
+            orch.tools_acl.observe(body["tools"])
+            out["tools"], info["tools_info"] = orch.tools_acl.effective(conversation_id, body["tools"])
         if isinstance(user_text, str):
             turn = sum(1 for m in original if m.get("role") == "user")
-            tools_chars = len(json.dumps(body["tools"], ensure_ascii=False)) if body.get("tools") else 0
+            tools_chars = len(json.dumps(out["tools"], ensure_ascii=False)) if out.get("tools") else 0
             qvec = None
             if plan_key(conversation_id, turn, user_text) not in plans and cfg.proxy.inject_memory:
                 qvec = await orch.query_vector(user_text)     # once per turn; None -> keywords only
@@ -432,6 +467,22 @@ def build_router(orch: Orchestrator) -> APIRouter:
             + (len(json.dumps(out["tools"], ensure_ascii=False)) if out.get("tools") else 0)
         return out, info
 
+    def followup(out: dict, body: dict, conversation_id: str, names: list[str]) -> dict:
+        """Answer the model's load_tools call ourselves and re-ask with the loaded definitions."""
+        acl = orch.tools_acl
+        ok, bad = acl.load(conversation_id, names, body.get("tools") or [])
+        result = (f"Loaded: {', '.join(ok)}. Their full definitions are now available; call them as needed."
+                  if ok else "Nothing was loaded.")
+        if bad:
+            result += f" Not available: {', '.join(bad)}."
+        nxt = copy.deepcopy(out)
+        nxt["messages"] = out["messages"] + [
+            {"role": "assistant", "content": "", "tool_calls": [{"function": {
+                "name": acl.cfg.meta_tool_name, "arguments": {"names": names}}}]},
+            {"role": "tool", "tool_name": acl.cfg.meta_tool_name, "content": result}]
+        nxt["tools"], _ = acl.effective(conversation_id, body.get("tools") or [])
+        return nxt
+
     async def finalize(body: dict, info: dict, conversation_id: str, request_id: str,
                        content: str, tool_calls: list, final: dict, t0: float,
                        first_token_at: float | None, error: str | None,
@@ -457,6 +508,9 @@ def build_router(orch: Orchestrator) -> APIRouter:
                "tool_tokens_saved": info.get("tool_tokens_saved", 0),
                "memory_flags": len(stripper.flags) if stripper else 0,
                "tool_calls_in_response": len(tool_calls),
+               **(info.get("tools_info") or {}),
+               "tools_blocked": len(info.get("tools_blocked") or []),
+               "tool_load_rounds": info.get("tool_load_rounds", 0),
                "thinking": ("client" if not plan or plan.think is thinking.KEEP else
                             ("on" if plan.think else "off")),
                "thinking_reason": plan.think_reason if plan else "",
@@ -471,6 +525,12 @@ def build_router(orch: Orchestrator) -> APIRouter:
                                     final.get("prompt_eval_count"))
         orch.metrics.record_request(rec)
         (plog.error if error else plog.info)("proxied chat", extra=rec)
+        if orch.tools_acl is not None:
+            try:
+                orch.tools_acl.record([((tc or {}).get("function") or {}).get("name", "") for tc in tool_calls],
+                                      info.get("tools_blocked") or [])
+            except Exception:
+                log.exception("tool usage recording failed")
 
         if error:
             orch.conv_log.system_event(conversation_id, "primary_failed", project_id=orch.project_id,
@@ -518,25 +578,49 @@ def build_router(orch: Orchestrator) -> APIRouter:
         headers = {"content-type": "application/json"}
         stripper = new_stripper()
 
+        acl = orch.tools_acl if (orch.tools_acl is not None and orch.config.tools.enabled and body.get("tools")) else None
+        rounds_left = orch.config.tools.max_load_rounds if acl else 0
+        info["tools_blocked"], info["tool_load_rounds"] = [], 0
+
         if not stream:
-            try:
-                resp = await orch.primary.http.post("/api/chat", json=out, headers=headers)
-            except Exception as e:
-                await finalize(body, info, conversation_id, request_id, "", [], {}, t0, None, str(e), None)
-                return JSONResponse({"error": f"orchestrator: primary Ollama unreachable: {e}"},
-                                    status_code=502)
-            data: dict = {}
-            error = None
-            if resp.status_code >= 400:
-                error = f"HTTP {resp.status_code}: {resp.text[:300]}"
-            else:
+            while True:
                 try:
-                    data = resp.json()
-                except ValueError:
-                    error = "malformed JSON from primary"
-            msg = data.get("message") or {}
+                    resp = await orch.primary.http.post("/api/chat", json=out, headers=headers)
+                except Exception as e:
+                    await finalize(body, info, conversation_id, request_id, "", [], {}, t0, None, str(e), None)
+                    return JSONResponse({"error": f"orchestrator: primary Ollama unreachable: {e}"},
+                                        status_code=502)
+                data: dict = {}
+                error = None
+                if resp.status_code >= 400:
+                    error = f"HTTP {resp.status_code}: {resp.text[:300]}"
+                else:
+                    try:
+                        data = resp.json()
+                    except ValueError:
+                        error = "malformed JSON from primary"
+                msg = data.get("message") or {}
+                acl_changed = False
+                if acl and not error and msg.get("tool_calls"):
+                    keep, blocked, load = acl.classify_calls(msg["tool_calls"])
+                    if load and rounds_left > 0:
+                        rounds_left -= 1
+                        info["tool_load_rounds"] += 1
+                        out = followup(out, body, conversation_id, load)
+                        continue
+                    if load:
+                        blocked.append(acl.cfg.meta_tool_name)
+                    info["tools_blocked"] += blocked
+                    if len(keep) != len(msg["tool_calls"]):
+                        msg = {**msg, "tool_calls": keep} if keep else {k: v for k, v in msg.items() if k != "tool_calls"}
+                        if not keep and info["tools_blocked"]:
+                            note = acl.blocked_note(info["tools_blocked"])
+                            msg["content"] = f"{msg.get('content') or ''}\n\n{note}".strip()
+                        data["message"] = msg
+                        acl_changed = True
+                break
             content = msg.get("content", "") or ""
-            changed = False
+            changed = acl_changed
             if stripper is not None and content and not error:
                 visible = stripper.feed(content) + stripper.finish()
                 if stripper.flags:
@@ -568,21 +652,42 @@ def build_router(orch: Orchestrator) -> APIRouter:
             return Response(content, status_code=upstream.status_code,
                             headers=_resp_headers(upstream.headers))
 
-        acc = _StreamAccumulator(stripper)
+        acc = _StreamAccumulator(stripper, acl, allow_load=rounds_left > 0)
 
         async def relay():
+            nonlocal acc, upstream, body_iter, rounds_left, out
             completed = False
+            tool_calls: list = []
             try:
-                async for chunk in body_iter:
-                    emitted = acc.feed(chunk, time.perf_counter())
-                    if emitted:
-                        yield emitted
-                tail = acc.close(time.perf_counter())
-                if tail:
-                    yield tail
+                while True:
+                    async for chunk in body_iter:
+                        emitted = acc.feed(chunk, time.perf_counter())
+                        if emitted:
+                            yield emitted
+                    tail = acc.close(time.perf_counter())
+                    if tail:
+                        yield tail
+                    await upstream.aclose()
+                    info["tools_blocked"] += acc.blocked
+                    if acc.load and rounds_left > 0 and not acc.error:
+                        # The model asked for tools: answer load_tools ourselves and continue the
+                        # same response with a follow-up request. The client sees one stream.
+                        rounds_left -= 1
+                        info["tool_load_rounds"] += 1
+                        out = followup(out, body, conversation_id, acc.load)
+                        upstream, body_iter = await orch.primary.stream_raw("POST", "/api/chat", json_body=out,
+                                                                            headers=headers)
+                        prev = acc
+                        acc = _StreamAccumulator(stripper, acl, allow_load=rounds_left > 0)
+                        acc.content, acc.first_token_at = prev.content, prev.first_token_at
+                        continue
+                    break
                 completed = True
             finally:
-                await upstream.aclose()
+                try:
+                    await upstream.aclose()
+                except Exception:
+                    pass
                 error = acc.error or (None if completed and acc.final else "stream ended early")
                 text = "".join(acc.content)
                 if stripper is not None and stripper.flags:

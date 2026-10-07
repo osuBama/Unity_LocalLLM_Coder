@@ -171,6 +171,70 @@ def cmd_docs(cfg, args) -> int:
             pass
 
 
+def cmd_tools(cfg, args) -> int:
+    from .database import Database
+    from .tool_acl import ToolACL
+
+    class _O:                       # ToolACL only needs db + config
+        pass
+    o = _O()
+    o.db, o.config = Database(cfg.database_path), cfg
+    acl = ToolACL(o)
+    sub = args.tools_cmd
+    try:
+        if sub == "list":
+            data = acl.listing()
+            t = data["tokens_per_request"]
+            print(f"default mode for new tools: {data['default_mode']}   "
+                  f"per request: ~{t['automatic']} tokens of definitions + ~{t['catalog']} catalog "
+                  f"(all automatic would be ~{t['all_if_automatic']})")
+            if not data["sources"]:
+                print("No tools seen yet: they appear after your client sends its first request.")
+            for g in data["sources"]:
+                if args.source and g["source"] != args.source:
+                    continue
+                print(f"\n[{g['source']}]  source mode: {g['mode'] or 'default'}")
+                for tl in g["tools"]:
+                    print(f"  {tl['name']:<40} {tl['effective_mode']:<10} ({tl['mode_from']})  "
+                          f"{tl['schema_tokens']:>5} tok  {tl['calls']:>4} calls  {tl['blocked']:>3} blocked")
+            if data["rules"]:
+                print("\nrules: " + "; ".join(f"#{r['id']} {r['pattern']} -> {r['source']}" for r in data["rules"]))
+            return 0
+        if sub == "set":
+            mode = None if args.mode == "inherit" else args.mode
+            if args.source:
+                acl.set_mode(source=args.target, mode=mode)
+            else:
+                acl.set_mode(tool=args.target, mode=mode)
+            print(f"{'source ' if args.source else ''}{args.target}: {args.mode}")
+            return 0
+        if sub == "default":
+            acl.set_default(args.mode)
+            print(f"default mode: {args.mode}")
+            return 0
+        if sub == "source":
+            acl.set_source(args.tool, None if args.clear else args.source)
+            print(f"{args.tool}: source {'automatic' if args.clear else args.source}")
+            return 0
+        if sub == "rule":
+            if args.rule_cmd == "add":
+                print(f"rule #{acl.add_rule(args.pattern, args.source)}: {args.pattern} -> {args.source}")
+            elif args.rule_cmd == "remove":
+                print("removed" if acl.remove_rule(args.id) else f"no rule #{args.id}")
+            else:
+                for r in acl.listing()["rules"]:
+                    print(f"#{r['id']} {r['pattern']} -> {r['source']}")
+            return 0
+        if sub == "forget":
+            n = acl.forget(tool=args.tool, older_than_days=args.older_than)
+            print(f"forgot {n} tool(s); they reappear if your client still offers them")
+            return 0
+    except (ValueError, KeyError) as e:
+        print(f"error: {e}")
+        return 2
+    return 1
+
+
 def cmd_memory(cfg, args) -> int:
     orch = _orch(cfg)
     try:
@@ -473,6 +537,32 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--limit", type=int, default=5)
     dsp.add_parser("mcp", help="show the MCP endpoint and the OpenClaw config for it")
 
+    t = sp.add_parser("tools", help="which tools the model sees: off / automatic / on_demand, by source")
+    tsp = t.add_subparsers(dest="tools_cmd", required=True)
+    s = tsp.add_parser("list")
+    s.add_argument("--source")
+    s = tsp.add_parser("set", help="set a tool's (or with --source, a source's) mode")
+    s.add_argument("target")
+    s.add_argument("mode", choices=["off", "automatic", "on_demand", "inherit"])
+    s.add_argument("--source", action="store_true", help="target is a source name")
+    s = tsp.add_parser("default", help="mode for tools nobody configured yet")
+    s.add_argument("mode", choices=["off", "automatic", "on_demand"])
+    s = tsp.add_parser("source", help="move a tool to another source")
+    s.add_argument("tool")
+    s.add_argument("source", nargs="?")
+    s.add_argument("--clear", action="store_true", help="back to automatic grouping")
+    s = tsp.add_parser("rule", help="grouping rules: pattern -> source")
+    rsp = s.add_subparsers(dest="rule_cmd", required=True)
+    r = rsp.add_parser("add")
+    r.add_argument("pattern")
+    r.add_argument("source")
+    r = rsp.add_parser("remove")
+    r.add_argument("id", type=int)
+    rsp.add_parser("list")
+    s = tsp.add_parser("forget", help="drop a tool (or stale ones) from the list")
+    s.add_argument("tool", nargs="?")
+    s.add_argument("--older-than", type=int, help="days since last seen")
+
     e = sp.add_parser("eval", help="evaluation harness (docs/DOCUMENTATION.md §12)")
     esp = e.add_subparsers(dest="eval_cmd", required=True)
     esp.add_parser("sessions", help="list recorded sessions available for replay")
@@ -551,6 +641,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_eval(cfg, args)
     if args.cmd == "docs":
         return cmd_docs(cfg, args)
+    if args.cmd == "tools":
+        return cmd_tools(cfg, args)
     return 1
 
 

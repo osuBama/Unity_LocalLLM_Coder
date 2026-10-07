@@ -1,5 +1,7 @@
 # Local AI Orchestrator: full documentation
 
+*Continuing development (architecture, history, invariants, workflow): see [AGENTS.md](../AGENTS.md).*
+
 Run two local LLMs on two GPUs as one system:
 
 - **GPU A, the primary model**, does the actual work: chat, coding, agent tool calls.
@@ -539,6 +541,48 @@ The console's **Library** tab does all of the same, with a folder browser and li
 4. Add golden questions about APIs, e.g. `expect_all: ["MovePosition"]`. The diagnosis shows whether a miss
    came from the library, retrieval, or the model (location `reference`).
 
+### 9.11 Tool access control
+
+Every tool your client offers the model passes through the orchestrator in the request's `tools` field:
+OpenClaw's built-ins and every tool of every MCP server it connects to (a Unity MCP server alone can
+offer dozens). The orchestrator registers them automatically, groups them by **source**, and decides per
+tool what the model actually gets. The model never sees the settings, only the resulting tool list.
+
+| Mode | The model gets | Per request |
+|---|---|---|
+| **Off** | Nothing. If it calls the tool anyway (e.g. remembering the name), the call is **blocked**: removed from the response and replaced by a short note, so your client never executes it. | 0 tokens |
+| **Automatic** | The full definition, every request (the behaviour without this feature). | full schema |
+| **On demand** | One line in the catalog of a single `load_tools` tool. When the model calls `load_tools`, the orchestrator answers it itself, adds the full definitions, and re-asks the model within the same response (your client sees one normal answer). Loaded tools stay loaded for the rest of that conversation. | one catalog line until loaded |
+
+- **Sources:** by name prefix (`unity__read_console` → `unity`, `mcp__github__…` → `github`), the
+  orchestrator's own docs tools as `local-docs`, everything else as `client`. Grouping rules (`unity_*` → Unity,
+  first match wins) and per-tool moves override that.
+- **Modes** are set per source, with optional per-tool overrides; tools nobody configured follow
+  `tools.default_mode` (`automatic` by default, so nothing changes until you decide). Set it to `on_demand` to
+  make new MCP servers cheap by default.
+- **Cache:** tool definitions sit in the cached start of the prompt. A conversation's loaded set only grows,
+  so the cache breaks only when something is loaded or a setting changes.
+- **Size estimates** use the filtered list, so turning tools off or on demand also leaves more room for history.
+- Limits: `tools.max_load_rounds` (2) internal rounds per request; `tools.block_disabled_calls`. `/metrics`
+  shows `tools_sent`, `tools_hidden`, `tools_in_catalog`, `tools_blocked` and `tool_load_rounds` per request.
+
+Manage it in the console's **Tools** tab (with the per-request token cost of your choices) or with `ai tools`:
+
+```
+ai tools list [--source unity]
+ai tools set --source unity on_demand
+ai tools set unity__execute_code off
+ai tools set unity__read_console automatic      # or: inherit
+ai tools default on_demand
+ai tools rule add "unity_*" unity | rule list | rule remove 3
+ai tools source read_file workspace | source read_file --clear
+ai tools forget --older-than 30
+```
+
+**A reasonable start with a Unity MCP server:** the whole Unity source *on demand*; the compile-fix loop
+(`read_console`, refresh/recompile, `run_tests`) *automatic*; arbitrary-code tools (`execute_code` and similar)
+*off*.
+
 ## 10. Web console
 
 `http://127.0.0.1:8000/ui` (or `ai ui`) is served by the orchestrator itself: nothing extra to install,
@@ -557,6 +601,8 @@ every loaded model sits on the GPU, and the memory GPU's task queue. Tabs:
   your comments intact, and validates it first (nothing is written if it wouldn't load). Settings marked
   *applies now* take effect immediately; *after restart* ones (models, context sizes, memory budget,
   flags) need the orchestrator restarted.
+- **Tools:** every tool the client offers, grouped by source, with Off / Automatic / On demand per source and
+  per tool, usage counts, the per-request token cost of your choices, grouping rules and forgetting (§9.11).
 - **Library:** reference libraries (§9.10): add with a folder browser, re-index, edit version and description,
   enable or disable, automatic excerpts on or off, remove, search and exact-symbol lookup, live indexing
   progress with cancel, and the MCP connection details.
@@ -577,6 +623,7 @@ every loaded model sits on the GPU, and the memory GPU's task queue. Tabs:
 | `ai memory backup / consolidate [--dry-run] / reindex` | Memory: *Back up now*, *Preview consolidation* / *Consolidate now*, *Reindex for search* |
 | `ai memory rebuild [--replay [--reset]] / restore` | Memory: *Rebuild…*, *Restore from a backup…* |
 | `ai docs …` (all subcommands) | Library |
+| `ai tools …` (all subcommands) | Tools |
 | `config.yaml` edits | Settings (curated, validated, comments kept) |
 | `ai eval sessions / run (all options)` | Evals: *More options* (sessions, memory mode, max turns, seed, answer length, extraction, client system prompt) |
 | `ai eval candidates / accept / dismiss / generate` | Evals: *Questions waiting for review*, *Generate questions* |
@@ -602,6 +649,7 @@ ai eval candidates [--all] | ai eval accept <id> [--expect X] [--forbid Y] | ai 
 ai eval generate [--mode later|new-session|both] [--last N] [--gap 6] [--no-model] [--accept-all]
 ai docs list | add <folder> --name N [--version V] [--description D] [--auto] | update N [--path P] | remove N
 ai docs enable|disable N | auto N on|off | set N [--version] [--description] | search "q" | lookup Symbol | mcp
+ai tools list | set TOOL|--source SRC off|automatic|on_demand|inherit | default MODE | source | rule | forget
 ```
 
 `ai memory context "prompt"` shows exactly what would be injected for a prompt. `rebuild` alone
@@ -832,6 +880,6 @@ traffic. `ai memory changes` (rejection rate), `ai memory sessions` (summary qua
   `project_id`).
 - A large second GPU could take on more: embeddings, a bigger memory model, or splitting one large
   primary model across both cards instead. That trades the memory system for raw model size.
-- Tested with fake Ollama instances (235 tests: validator, atomic writes, streaming, flag stripping,
-  trimming, compression and memory-base cache stability, consolidation guards, evaluation harness, setup helpers, thinking decisions, token calibration, correction capture, hybrid retrieval, history recall, repeat runs, the console's backend, point-in-time memory, paired statistics, answer diagnosis, question generation, reference libraries, MCP, retries…). Real-GPU behaviour (pinning, VRAM fit, a given
+- Tested with fake Ollama instances (244 tests: validator, atomic writes, streaming, flag stripping,
+  trimming, compression and memory-base cache stability, consolidation guards, evaluation harness, setup helpers, thinking decisions, token calibration, correction capture, hybrid retrieval, history recall, repeat runs, the console's backend, point-in-time memory, paired statistics, answer diagnosis, question generation, reference libraries, MCP, tool access control, retries…). Real-GPU behaviour (pinning, VRAM fit, a given
   model's JSON quality) can only be verified on your machine (§4.5); the evaluation harness (§12) is how you do that.

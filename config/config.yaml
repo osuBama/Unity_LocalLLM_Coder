@@ -157,6 +157,18 @@ references:
   mcp_enabled: true
   tool_max_tokens: 1500         # cap on one docs_search / docs_lookup result
 
+tools:
+  # Tool access control. Every tool your client offers (OpenClaw built-ins, each MCP server) is
+  # registered automatically and grouped by source; set each source or tool to off / automatic /
+  # on_demand in the console's Tools tab or with `ai tools`. off = the model never sees it and calls
+  # are blocked; automatic = full definition every request; on_demand = one line in a load_tools
+  # catalog, loaded for the rest of the conversation when the model asks.
+  enabled: true
+  default_mode: automatic       # for newly seen tools; on_demand saves the most context
+  meta_tool_name: load_tools
+  block_disabled_calls: true
+  max_load_rounds: 2
+
 thinking:
   # Primary-model thinking per turn. auto: thinking is switched OFF only for clearly simple
   # turns (short, no code/errors, no why/debug/design/implement-type words, EN+PT); otherwise

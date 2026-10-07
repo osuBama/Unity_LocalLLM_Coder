@@ -186,6 +186,15 @@ class ReferencesConfig(_Strict):
     tool_max_tokens: int = Field(1500, ge=200, le=8000)  # cap on one tool result
 
 
+class ToolsConfig(_Strict):
+    """Which tool definitions the model sees (console: Tools tab; CLI: ai tools)."""
+    enabled: bool = True
+    default_mode: Literal["off", "automatic", "on_demand"] = "automatic"   # for tools nobody configured yet
+    meta_tool_name: str = "load_tools"
+    block_disabled_calls: bool = True     # a call to an "off" tool never reaches the client
+    max_load_rounds: int = Field(2, ge=0, le=5)   # internal load_tools rounds per request
+
+
 class SessionConfig(_Strict):
     summaries_enabled: bool = True
     summary_max_tokens: int = Field(400, ge=50, le=2000)
@@ -212,6 +221,7 @@ class Config(_Strict):
     embeddings: EmbeddingsConfig = EmbeddingsConfig()
     history_recall: HistoryRecallConfig = HistoryRecallConfig()
     references: ReferencesConfig = ReferencesConfig()
+    tools: ToolsConfig = ToolsConfig()
 
     @model_validator(mode="after")
     def _check_compression(self):

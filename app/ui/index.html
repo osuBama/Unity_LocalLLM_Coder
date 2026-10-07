@@ -149,6 +149,13 @@ td.fail { color: var(--bad); }
 details > summary { cursor: pointer; color: var(--ink-soft); font-size: 14px; margin: 6px 0; }
 .sessions-pick { max-height: 200px; overflow-y: auto; border: 1px solid var(--line); border-radius: 4px; background: #fff; padding: 4px 8px; margin-top: 6px; }
 .sessions-pick label { display: flex; gap: 8px; font-size: 13px; padding: 2px 0; }
+.mode-off { color: var(--bad); } .mode-automatic { color: var(--primary); } .mode-on_demand { color: var(--memory); }
+.tool-row td { vertical-align: middle; }
+.src-head { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: baseline; justify-content: space-between; }
+.src-head h3 { margin: 0; }
+.costbar { display: grid; grid-template-columns: minmax(170px, 230px) 1fr 110px; gap: 10px; align-items: center; font-size: 13px; margin: 4px 0; }
+.costbar .track { height: 12px; background: var(--paper); border-radius: 2px; position: relative; }
+.costbar .fill { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 2px; }
 .toast { position: fixed; right: 18px; bottom: 18px; max-width: 420px; background: var(--ink); color: #fff; padding: 10px 14px; border-radius: 4px; font-size: 14px; display: none; }
 .toast.show { display: block; }
 .toast.err { background: var(--bad); }
@@ -176,6 +183,7 @@ details > summary { cursor: pointer; color: var(--ink-soft); font-size: 14px; ma
   <button role="tab" data-view="chat" aria-selected="false">Chat</button>
   <button role="tab" data-view="memory" aria-selected="false">Memory</button>
   <button role="tab" data-view="library" aria-selected="false">Library</button>
+  <button role="tab" data-view="tools" aria-selected="false">Tools</button>
   <button role="tab" data-view="settings" aria-selected="false">Settings</button>
   <button role="tab" data-view="evals" aria-selected="false">Evals</button>
 </nav>
@@ -294,6 +302,24 @@ details > summary { cursor: pointer; color: var(--ink-soft); font-size: 14px; ma
   <div class="panel a" id="lib-mcp"></div>
 </section>
 
+<!-- ========================================================= tools -->
+<section class="view" id="view-tools">
+  <p class="hint">Every tool your client offers the model (OpenClaw's own and each MCP server's) appears here automatically after
+    its first request, grouped by source. The model never sees this page, only the result:
+    <b class="mode-off">Off</b>: removed, and calls to it are blocked.
+    <b class="mode-automatic">Automatic</b>: full definition on every request.
+    <b class="mode-on_demand">On demand</b>: one line in a catalog; the model loads it when needed, for the rest of that conversation.</p>
+  <div class="panel" id="tl-summary"></div>
+  <div id="tl-sources"></div>
+  <h2>Grouping rules</h2>
+  <p class="hint">Tools are grouped by name prefix (e.g. <code>unity__read_console</code> → unity). Rules override that: the first matching pattern wins (<code>*</code> and <code>?</code> wildcards).</p>
+  <div class="panel">
+    <div id="tl-rules"></div>
+    <div class="row" style="margin-top:8px"><input type="text" id="tl-rule-pat" placeholder="Pattern, e.g. unity_*" aria-label="Pattern">
+      <input type="text" id="tl-rule-src" placeholder="Source name" aria-label="Source"><button class="btn" id="tl-rule-add">Add rule</button></div>
+  </div>
+</section>
+
 <!-- ====================================================== settings -->
 <section class="view" id="view-settings">
   <p class="hint" id="set-hint">Changes are written to config.yaml with a backup; your comments are kept. Settings marked
@@ -395,7 +421,7 @@ function show(view) {
   $$("nav.tabs button").forEach(b => b.setAttribute("aria-selected", b.dataset.view === view));
   $$("section.view").forEach(s => s.classList.toggle("on", s.id === "view-" + view));
   location.hash = view;
-  ({ memory: loadMemory, settings: loadSettings, evals: loadEvals, library: loadLibrary }[view] || (() => {}))();
+  ({ memory: loadMemory, settings: loadSettings, evals: loadEvals, library: loadLibrary, tools: loadTools }[view] || (() => {}))();
 }
 
 /* -------------------------------------------- header lanes + overview */
@@ -727,6 +753,53 @@ $("#ls-go").onclick = ev => busy(ev.target, async () => {
 });
 $("#ls-q").addEventListener("keydown", e => { if (e.key === "Enter") $("#ls-go").click(); });
 
+/* ----------------------------------------------------------- tools */
+const MODE_LABEL = { off: "Off", automatic: "Automatic", on_demand: "On demand" };
+async function loadTools() {
+  let r; try { r = await api("/ui/api/tools"); } catch (e) { return toast(e.message, true); }
+  const t = r.tokens_per_request, max = Math.max(1, t.all_if_automatic);
+  const nTools = r.sources.reduce((a, g) => a + g.tools.length, 0);
+  $("#tl-summary").innerHTML = `${r.enabled ? "" : `<p class="flag">Tool access control is off (Settings, Tools): every tool currently passes through unchanged.</p>`}
+    <h3>Cost per request</h3>
+    <div class="costbar"><span>Automatic tools (full definitions)</span><span class="track"><span class="fill" style="width:${100 * t.automatic / max}%;background:var(--primary)"></span></span><span class="num">~${fmt(t.automatic)} tokens</span></div>
+    <div class="costbar"><span>On-demand catalog</span><span class="track"><span class="fill" style="width:${100 * t.catalog / max}%;background:var(--memory)"></span></span><span class="num">~${fmt(t.catalog)} tokens</span></div>
+    <div class="costbar"><span>If everything were automatic</span><span class="track"><span class="fill" style="width:100%;background:var(--line)"></span></span><span class="num">~${fmt(t.all_if_automatic)} tokens</span></div>
+    <div class="row" style="margin-top:12px"><label class="inline">New tools start as <select id="tl-default">${Object.entries(MODE_LABEL).map(([k, v]) => `<option value="${k}" ${k === r.default_mode ? "selected" : ""}>${v}</option>`).join("")}</select></label>
+      <span class="hint" style="margin:0">${nTools} tools from ${r.sources.length} sources</span>
+      <label class="inline">Forget tools not seen for <input type="number" id="tl-stale" value="30" min="1" style="width:64px"> days</label><button class="btn quiet" id="tl-forget-stale">Forget</button></div>`;
+  $("#tl-default").onchange = async e => { try { await post("/ui/api/tools/default", { mode: e.target.value }); toast(`New tools start as ${MODE_LABEL[e.target.value]}`); loadTools(); } catch (x) { toast(x.message, true); } };
+  $("#tl-forget-stale").onclick = ev => busy(ev.target, async () => { const x = await post("/ui/api/tools/forget", { older_than_days: +$("#tl-stale").value }); toast(`Forgot ${x.forgotten} tools`); loadTools(); });
+  const sources = r.sources.map(g => g.source);
+  $("#tl-sources").innerHTML = r.sources.map(g => `<div class="panel" data-src="${esc(g.source)}">
+    <div class="src-head"><h3>${esc(g.source)} <span class="hint" style="font-weight:400">${g.tools.length} tools, ~${fmt(g.tokens_if_automatic)} tokens if automatic</span></h3>
+      <label class="inline">Whole source <select data-srcmode>${[["", `Default (${MODE_LABEL[r.default_mode]})`], ...Object.entries(MODE_LABEL)].map(([k, v]) => `<option value="${k}" ${(g.mode || "") === k ? "selected" : ""}>${v}</option>`).join("")}</select></label></div>
+    <div class="scroll"><table><tr><th>Tool</th><th>Mode</th><th class="n">Tokens</th><th class="n">Calls</th><th class="n">Loads</th><th class="n">Blocked</th><th>Last seen</th><th>Source</th><th></th></tr>
+    ${g.tools.map(tl => `<tr class="tool-row" data-tool="${esc(tl.name)}"><td><code>${esc(tl.name)}</code><div class="hint" style="margin:0">${esc(tl.description)}</div></td>
+      <td><select data-mode aria-label="Mode of ${esc(tl.name)}"><option value="" ${tl.mode ? "" : "selected"}>Inherit: ${MODE_LABEL[tl.effective_mode]}</option>${Object.entries(MODE_LABEL).map(([k, v]) => `<option value="${k}" ${tl.mode === k ? "selected" : ""}>${v}</option>`).join("")}</select>
+        <div class="mode-${tl.effective_mode}" style="font-size:12px">${MODE_LABEL[tl.effective_mode]}${tl.mode_from === "tool" ? "" : ` (from ${tl.mode_from})`}</div></td>
+      <td class="n">${fmt(tl.schema_tokens)}</td><td class="n">${fmt(tl.calls)}</td><td class="n">${fmt(tl.loads)}</td><td class="n ${tl.blocked ? "fail" : ""}">${fmt(tl.blocked)}</td>
+      <td style="white-space:nowrap">${esc((tl.last_seen || "").replace("T", " ").slice(0, 16))}</td>
+      <td><input type="text" data-move list="tl-src-list" value="${esc(tl.source_override || "")}" placeholder="automatic" style="width:120px" aria-label="Source of ${esc(tl.name)}"></td>
+      <td><button class="btn quiet" data-forget title="Remove from this list; it reappears if the client still offers it">Forget</button></td></tr>`).join("")}</table></div></div>`).join("")
+    || `<div class="panel"><p class="hint">No tools seen yet. They appear here after your client (e.g. OpenClaw) sends its first request through the orchestrator.</p></div>`;
+  $("#tl-sources").insertAdjacentHTML("beforeend", `<datalist id="tl-src-list">${sources.map(x => `<option value="${esc(x)}">`).join("")}</datalist>`);
+  $$("#tl-sources [data-src]").forEach(p => {
+    $("[data-srcmode]", p).onchange = async e => { try { await post("/ui/api/tools/mode", { source: p.dataset.src, mode: e.target.value || null }); toast(`${p.dataset.src}: ${e.target.value ? MODE_LABEL[e.target.value] : "default"}`); loadTools(); } catch (x) { toast(x.message, true); } };
+  });
+  $$("#tl-sources [data-tool]").forEach(row => {
+    const name = row.dataset.tool;
+    $("[data-mode]", row).onchange = async e => { try { await post("/ui/api/tools/mode", { tool: name, mode: e.target.value || null }); toast(`${name}: ${e.target.value ? MODE_LABEL[e.target.value] : "inherit"}`); loadTools(); } catch (x) { toast(x.message, true); } };
+    $("[data-move]", row).onchange = async e => { try { await post("/ui/api/tools/source", { tool: name, source: e.target.value.trim() || null }); toast(`${name} moved`); loadTools(); } catch (x) { toast(x.message, true); } };
+    $("[data-forget]", row).onclick = ev => busy(ev.target, async () => { await post("/ui/api/tools/forget", { tool: name }); loadTools(); });
+  });
+  $("#tl-rules").innerHTML = r.rules.length ? `<table><tr><th>Pattern</th><th>Source</th><th></th></tr>${r.rules.map(x => `<tr><td><code>${esc(x.pattern)}</code></td><td>${esc(x.source)}</td><td><button class="btn quiet" data-rule="${x.id}">Remove</button></td></tr>`).join("")}</table>` : `<p class="hint">No rules.</p>`;
+  $$("#tl-rules [data-rule]").forEach(b => b.onclick = ev => busy(ev.target, async () => { await post(`/ui/api/tools/rules/${b.dataset.rule}/remove`); loadTools(); }));
+}
+$("#tl-rule-add").onclick = ev => busy(ev.target, async () => {
+  await post("/ui/api/tools/rules", { pattern: $("#tl-rule-pat").value.trim(), source: $("#tl-rule-src").value.trim() });
+  $("#tl-rule-pat").value = $("#tl-rule-src").value = ""; toast("Rule added"); loadTools();
+});
+
 /* -------------------------------------------------------- settings */
 let settings = [], edits = {};
 async function loadSettings() {
@@ -891,7 +964,7 @@ $("#cand-accept-all").onclick = ev => busy(ev.target, async () => {
 
 /* ------------------------------------------------------------ start */
 refreshStatus(); setInterval(() => { if (!document.hidden) refreshStatus(); }, 5000);
-const initial = location.hash.slice(1); if (["overview", "chat", "memory", "library", "settings", "evals"].includes(initial)) show(initial);
+const initial = location.hash.slice(1); if (["overview", "chat", "memory", "library", "tools", "settings", "evals"].includes(initial)) show(initial);
 </script>
 </body>
 </html>

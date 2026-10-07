@@ -70,6 +70,7 @@ class FakeOllama:
         self.memory_json: dict | str = {"changes": []}
         self.fail_status: int | None = None
         self.simulate_cache = False     # prompt_eval_count = chars after the shared prefix / 4
+        self.tool_call_script: list = []  # per request: a tool_calls list, or None for a normal reply
         self._last_prompt = ""
         self.app = FastAPI()
         app = self.app
@@ -80,6 +81,8 @@ class FakeOllama:
             self.requests.append(body)
             if self.fail_status:
                 return JSONResponse({"error": "boom"}, status_code=self.fail_status)
+            if self.tool_call_script and body.get("format") is None:
+                self.tool_calls = self.tool_call_script.pop(0)
             if body.get("format") is not None:  # memory model call
                 content = self.memory_json if isinstance(self.memory_json, str) else json.dumps(self.memory_json)
                 return {"model": body["model"], "message": {"role": "assistant", "content": content},

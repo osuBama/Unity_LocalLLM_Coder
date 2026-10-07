@@ -107,6 +107,13 @@ SETTINGS: list[dict[str, Any]] = [
     {"group": "Reference libraries", "key": "references.half_precision", "label": "Half-precision vectors",
      "type": "bool", "live": True, "help": "Half the RAM for vectors indexed from now on; ranking is practically the same."},
 
+    {"group": "Tools", "key": "tools.enabled", "label": "Tool access control", "type": "bool", "live": True,
+     "help": "Apply the Tools tab settings to what the model sees. Off: every tool passes through unchanged."},
+    {"group": "Tools", "key": "tools.block_disabled_calls", "label": "Block calls to tools that are off",
+     "type": "bool", "live": True, "help": "A call to a disabled tool is replaced by a short note instead of reaching your client."},
+    {"group": "Tools", "key": "tools.max_load_rounds", "label": "Tool loading rounds per request", "type": "int",
+     "min": 0, "max": 5, "live": True, "help": "How many times the model may load on-demand tools within one answer."},
+
     {"group": "Maintenance", "key": "consolidation.enabled", "label": "Idle-time consolidation", "type": "bool",
      "live": True, "help": "Merge duplicates and tighten long entries when idle (with backups)."},
     {"group": "Maintenance", "key": "consolidation.idle_minutes", "label": "Idle after (minutes)", "type": "float",
@@ -198,6 +205,31 @@ class RebuildReq(BaseModel):
 
 class RestoreReq(BaseModel):
     backup: str = Field(min_length=1, max_length=200)
+
+
+class ToolMode(BaseModel):
+    tool: str | None = Field(None, max_length=200)
+    source: str | None = Field(None, max_length=200)
+    mode: str | None = None              # None / "" = inherit
+
+
+class ToolDefault(BaseModel):
+    mode: str
+
+
+class ToolSource(BaseModel):
+    tool: str = Field(min_length=1, max_length=200)
+    source: str | None = Field(None, max_length=200)
+
+
+class ToolRule(BaseModel):
+    pattern: str = Field(min_length=1, max_length=200)
+    source: str = Field(min_length=1, max_length=200)
+
+
+class ToolForget(BaseModel):
+    tool: str | None = Field(None, max_length=200)
+    older_than_days: int | None = Field(None, ge=1, le=3650)
 
 
 class CandidateAccept(BaseModel):
@@ -576,6 +608,51 @@ def build_ui_router(orch) -> APIRouter:
         except PermissionError:
             pass
         return {"path": str(p), "parent": str(p.parent) if p.parent != p else "", "dirs": dirs[:500], "files": files}
+
+    # ------------------------------------------------------------------ tools
+    @router.get("/ui/api/tools")
+    async def tools_list():
+        return orch.tools_acl.listing()
+
+    @router.post("/ui/api/tools/mode")
+    async def tools_mode(req: ToolMode):
+        try:
+            orch.tools_acl.set_mode(tool=req.tool, source=req.source, mode=req.mode or None)
+        except (ValueError, KeyError) as e:
+            raise HTTPException(400, str(e)) from e
+        return {"ok": True}
+
+    @router.post("/ui/api/tools/default")
+    async def tools_default(req: ToolDefault):
+        try:
+            orch.tools_acl.set_default(req.mode)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return {"ok": True}
+
+    @router.post("/ui/api/tools/source")
+    async def tools_source(req: ToolSource):
+        try:
+            orch.tools_acl.set_source(req.tool, req.source)
+        except KeyError as e:
+            raise HTTPException(404, str(e)) from e
+        return {"ok": True}
+
+    @router.post("/ui/api/tools/rules")
+    async def tools_rule_add(req: ToolRule):
+        return {"id": orch.tools_acl.add_rule(req.pattern, req.source)}
+
+    @router.post("/ui/api/tools/rules/{rid}/remove")
+    async def tools_rule_remove(rid: int):
+        if not orch.tools_acl.remove_rule(rid):
+            raise HTTPException(404, "no such rule")
+        return {"ok": True}
+
+    @router.post("/ui/api/tools/forget")
+    async def tools_forget(req: ToolForget):
+        if not req.tool and not req.older_than_days:
+            raise HTTPException(400, "give a tool or older_than_days")
+        return {"forgotten": orch.tools_acl.forget(tool=req.tool, older_than_days=req.older_than_days)}
 
     @router.post("/ui/api/candidates/{cid}/dismiss")
     async def dismiss(cid: int):
