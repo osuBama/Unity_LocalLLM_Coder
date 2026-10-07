@@ -1,4 +1,4 @@
-# Local AI Orchestrator
+# Unity LocalLLM Coder
 
 A local, two-GPU AI coding assistant for **building games**: Unity first, but nothing in it is engine-specific.
 It sits between your agent (e.g. [OpenClaw](https://docs.openclaw.ai)) and Ollama, and gives a mid-size local
